@@ -1,0 +1,231 @@
+const express = require("express");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const cors = require("cors");
+const multer = require("multer");
+const fs = require("fs").promises;
+const path = require("path");
+const lockfile = require("proper-lockfile");
+require("dotenv").config();
+
+const app = express();
+const PORT = 3000;
+const PRODUCTS_FILE = path.join(__dirname, "products.json");
+const UPLOADS_DIR = path.join(__dirname, "Uploads");
+const ALLOWED_BRANDS = ["Cartier", "Bvlgari", "Van Cleef & Arpels", "Chrome Hearts"];
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use("/Uploads", express.static(UPLOADS_DIR));
+
+// Multer configuration
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, UPLOADS_DIR);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+        cb(null, uniqueSuffix + path.extname(file.originalname));
+    },
+});
+
+const upload = multer({
+    storage,
+    fileFilter: (req, file, cb) => {
+        if (!file) {
+            console.log("File filter: No file provided");
+            return cb(new Error("No image file provided"), false);
+        }
+        const filetypes = /jpeg|jpg|png/;
+        const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = filetypes.test(file.mimetype);
+        if (extname && mimetype) {
+            console.log("File filter: Valid image file", { name: file.originalname, type: file.mimetype, size: file.size });
+            return cb(null, true);
+        }
+        console.log("File filter: Invalid file type", { name: file.originalname, type: file.mimetype });
+        cb(new Error("Only jpg, jpeg, and png files are allowed"), false);
+    },
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+});
+
+// File lock wrapper
+async function withFileLock(operation, callback) {
+    console.log(`Starting operation: ${operation}`);
+    const release = await lockfile.lock(PRODUCTS_FILE, { retries: 10 });
+    try {
+        return await callback();
+    } finally {
+        await release();
+        console.log(`Completed operation: ${operation}`);
+    }
+}
+
+// JWT verification middleware
+function verifyToken(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+        return res.status(401).json({ message: "No token provided" });
+    }
+    const token = authHeader.split(" ")[1];
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded;
+        next();
+    } catch (err) {
+        console.error("Token verification error:", err);
+        res.status(401).json({ message: "Invalid token" });
+    }
+}
+
+// Login route
+app.post("/api/login", async (req, res) => {
+    const { username, password } = req.body;
+    console.log("Login attempt:", { username });
+    if (username !== "GiangKimHoan_admin" || !(await bcrypt.compare(password, "$2b$10$F2xpnjOtJ7.fQik8C/e0NuwPeTiLamEoEJYWrCv5N9HGNHtXjp/Xy"))) {
+        console.log("Login failed: Invalid credentials");
+        return res.status(401).json({ message: "Invalid username or password" });
+    }
+    const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: "1h" });
+    console.log("Login successful:", { username });
+    res.json({ success: true, token });
+});
+
+// Get all products
+app.get("/api/products", async (req, res) => {
+    try {
+        const data = await fs.readFile(PRODUCTS_FILE, "utf8");
+        const products = JSON.parse(data);
+        res.json(products);
+    } catch (err) {
+        console.error("Error reading products:", err);
+        res.status(500).json({ message: "Error reading products" });
+    }
+});
+
+// Add a new product
+app.post("/api/products", verifyToken, upload.single("image"), async (req, res) => {
+    try {
+        const { name, brand, stock, originalPrice, salePrice } = req.body;
+        console.log("Received FormData:", { name, brand, stock, originalPrice, salePrice, image: req.file?.filename });
+        if (!name || !brand || !stock || !originalPrice || !salePrice || !req.file) {
+            return res.status(400).json({ message: "All fields are required, including a jpg or png image file" });
+        }
+        const normalizedBrand = brand.trim();
+        if (!ALLOWED_BRANDS.includes(normalizedBrand)) {
+            return res.status(400).json({ 
+                message: `Invalid brand: "${brand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}` 
+            });
+        }
+        const parsedStock = parseInt(stock);
+        const parsedOriginalPrice = parseFloat(originalPrice);
+        const parsedSalePrice = parseFloat(salePrice);
+        if (
+            isNaN(parsedStock) ||
+            parsedStock < 0 ||
+            isNaN(parsedOriginalPrice) ||
+            parsedOriginalPrice < 0 ||
+            isNaN(parsedSalePrice) ||
+            parsedSalePrice < 0
+        ) {
+            return res.status(400).json({ message: "Invalid numeric fields" });
+        }
+
+        const newProduct = await withFileLock("add_product", async () => {
+            const data = await fs.readFile(PRODUCTS_FILE, "utf8");
+            const products = JSON.parse(data);
+            const newProduct = {
+                id: products.length ? Math.max(...products.map((p) => p.id)) + 1 : 1,
+                name,
+                brand: normalizedBrand,
+                stock: parsedStock,
+                imageUrl: `/backend/Uploads/${req.file.filename}`,
+                originalPrice: parsedOriginalPrice,
+                salePrice: parsedSalePrice,
+            };
+            products.push(newProduct);
+            await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
+            return newProduct;
+        });
+
+        console.log("Product added:", newProduct);
+        res.status(201).json(newProduct);
+    } catch (err) {
+        console.error("Error adding product:", err);
+        res.status(500).json({ message: err.message || "Error adding product" });
+    }
+});
+
+// Update product stock
+app.patch("/api/products/:id", verifyToken, async (req, res) => {
+    const { id } = req.params;
+    const { stock } = req.body;
+    console.log("Updating stock:", { id, stock });
+    try {
+        if (isNaN(stock) || stock < 0) {
+            return res.status(400).json({ message: "Invalid stock value" });
+        }
+        const parsedStock = parseInt(stock);
+        const result = await withFileLock(`update_stock_${id}`, async () => {
+            const data = await fs.readFile(PRODUCTS_FILE, "utf8");
+            const products = JSON.parse(data);
+            const productIndex = products.findIndex((p) => p.id === parseInt(id));
+            if (productIndex === -1) {
+                return { error: "Product not found" };
+            }
+            products[productIndex].stock = parsedStock;
+            if (parsedStock === 0) {
+                products.splice(productIndex, 1);
+                console.log("Product deleted due to zero stock:", { id });
+            }
+            await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
+            return { product: products[productIndex] || null };
+        });
+
+        if (result.error) {
+            return res.status(404).json({ message: result.error });
+        }
+        res.json(result.product || { message: "Product deleted due to zero stock" });
+    } catch (err) {
+        console.error("Error updating stock:", err);
+        res.status(500).json({ message: "Error updating stock" });
+    }
+});
+
+// Delete product
+app.delete("/api/products/:id", verifyToken, async (req, res) => {
+    const { id } = req.params;
+    console.log("Deleting product:", { id });
+    try {
+        const result = await withFileLock(`delete_product_${id}`, async () => {
+            const data = await fs.readFile(PRODUCTS_FILE, "utf8");
+            const products = JSON.parse(data);
+            const productIndex = products.findIndex((p) => p.id === parseInt(id));
+            if (productIndex === -1) {
+                return { error: "Product not found" };
+            }
+            const [deletedProduct] = products.splice(productIndex, 1);
+            await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
+            return { product: deletedProduct };
+        });
+
+        if (result.error) {
+            return res.status(404).json({ message: result.error });
+        }
+        res.json({ message: "Product deleted successfully" });
+    } catch (err) {
+        console.error("Error deleting product:", err);
+        res.status(500).json({ message: "Error deleting product" });
+    }
+});
+
+// Start server
+app.listen(PORT, async () => {
+    try {
+        await fs.mkdir(UPLOADS_DIR, { recursive: true });
+        console.log(`Server running on http://localhost:${PORT}`);
+    } catch (err) {
+        console.error("Error starting server:", err);
+    }
+});

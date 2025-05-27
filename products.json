@@ -1,0 +1,74 @@
+[
+  {
+    "id": 1,
+    "name": "Pendant",
+    "brand": "Cartier",
+    "stock": 15,
+    "imageUrl": "/backend/Uploads/1748082079719-202399785.png",
+    "originalPrice": 24000000,
+    "salePrice": 12000000
+  },
+  {
+    "id": 2,
+    "name": "Van",
+    "brand": "Chrome Hearts",
+    "stock": 24,
+    "imageUrl": "/backend/Uploads/1748082515051-766666463.png",
+    "originalPrice": 30000000,
+    "salePrice": 12000000
+  },
+    {
+    "id": 3,
+    "name": "Pendant",
+    "brand": "Cartier",
+    "stock": 15,
+    "imageUrl": "/backend/Uploads/1748082079719-202399785.png",
+    "originalPrice": 24000000,
+    "salePrice": 12000000
+  },
+  {
+    "id": 4,
+    "name": "Van",
+    "brand": "Chrome Hearts",
+    "stock": 24,
+    "imageUrl": "/backend/Uploads/1748082515051-766666463.png",
+    "originalPrice": 30000000,
+    "salePrice": 12000000
+  },
+    {
+    "id": 5,
+    "name": "Pendant",
+    "brand": "Cartier",
+    "stock": 15,
+    "imageUrl": "/backend/Uploads/1748082079719-202399785.png",
+    "originalPrice": 24000000,
+    "salePrice": 12000000
+  },
+  {
+    "id": 6,
+    "name": "Van",
+    "brand": "Chrome Hearts",
+    "stock": 24,
+    "imageUrl": "/backend/Uploads/1748082515051-766666463.png",
+    "originalPrice": 30000000,
+    "salePrice": 12000000
+  },
+    {
+    "id": 7,
+    "name": "Pendant",
+    "brand": "Cartier",
+    "stock": 15,
+    "imageUrl": "/backend/Uploads/1748082079719-202399785.png",
+    "originalPrice": 24000000,
+    "salePrice": 12000000
+  },
+  {
+    "id": 8,
+    "name": "Van",
+    "brand": "Chrome Hearts",
+    "stock": 24,
+    "imageUrl": "/backend/Uploads/1748082515051-766666463.png",
+    "originalPrice": 30000000,
+    "salePrice": 12000000
+  }
+]
