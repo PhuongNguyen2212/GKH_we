@@ -3,72 +3,70 @@
     "id": 1,
     "name": "Pendant",
     "brand": "Cartier",
-    "stock": 15,
-    "imageUrl": "/backend/Uploads/1748082079719-202399785.png",
-    "originalPrice": 24000000,
+    "type": "Nhẫn",
+    "stock": 10,
+    "imageUrl": "/backend/uploads/1748354129841-414973135.png",
+    "originalPrice": 2412000000,
     "salePrice": 12000000
   },
   {
     "id": 2,
-    "name": "Van",
-    "brand": "Chrome Hearts",
-    "stock": 24,
-    "imageUrl": "/backend/Uploads/1748082515051-766666463.png",
-    "originalPrice": 30000000,
-    "salePrice": 12000000
+    "name": "Pendant",
+    "brand": "Bvlgari",
+    "type": "Nhẫn",
+    "stock": 222,
+    "imageUrl": "/backend/uploads/1748354687465-11398515.png",
+    "originalPrice": 2412000000,
+    "salePrice": 1212000
   },
-    {
+  {
     "id": 3,
     "name": "Pendant",
     "brand": "Cartier",
-    "stock": 15,
-    "imageUrl": "/backend/Uploads/1748082079719-202399785.png",
+    "type": "Nhẫn",
+    "stock": 9,
+    "imageUrl": "/backend/uploads/1748397986777-961266765.png",
     "originalPrice": 24000000,
     "salePrice": 12000000
   },
   {
     "id": 4,
-    "name": "Van",
-    "brand": "Chrome Hearts",
-    "stock": 24,
-    "imageUrl": "/backend/Uploads/1748082515051-766666463.png",
-    "originalPrice": 30000000,
+    "name": "Pendant",
+    "brand": "Cartier",
+    "type": "Nhẫn",
+    "stock": 14,
+    "imageUrl": "/backend/uploads/1748400413240-58419535.png",
+    "originalPrice": 24000000,
     "salePrice": 12000000
   },
-    {
+  {
     "id": 5,
     "name": "Pendant",
     "brand": "Cartier",
-    "stock": 15,
-    "imageUrl": "/backend/Uploads/1748082079719-202399785.png",
+    "type": "Dây chuyền",
+    "stock": 12,
+    "imageUrl": "/backend/uploads/1748403141402-181442328.png",
     "originalPrice": 24000000,
-    "salePrice": 12000000
+    "salePrice": 24000000
   },
   {
     "id": 6,
-    "name": "Van",
-    "brand": "Chrome Hearts",
-    "stock": 24,
-    "imageUrl": "/backend/Uploads/1748082515051-766666463.png",
-    "originalPrice": 30000000,
-    "salePrice": 12000000
-  },
-    {
-    "id": 7,
     "name": "Pendant",
-    "brand": "Cartier",
-    "stock": 15,
-    "imageUrl": "/backend/Uploads/1748082079719-202399785.png",
+    "brand": "Van Cleef & Arpels",
+    "type": "Vòng tay",
+    "stock": 12,
+    "imageUrl": "/backend/uploads/1748403176385-775231841.png",
     "originalPrice": 24000000,
-    "salePrice": 12000000
+    "salePrice": 0
   },
   {
-    "id": 8,
-    "name": "Van",
-    "brand": "Chrome Hearts",
-    "stock": 24,
-    "imageUrl": "/backend/Uploads/1748082515051-766666463.png",
-    "originalPrice": 30000000,
-    "salePrice": 12000000
+    "id": 7,
+    "name": "Pendant",
+    "brand": "Van Cleef & Arpels",
+    "type": "Nhẫn",
+    "stock": 15,
+    "imageUrl": "/backend/uploads/1748403539990-152399040.png",
+    "originalPrice": 24000000,
+    "salePrice": 0
   }
 ]
