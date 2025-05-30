@@ -6,14 +6,17 @@ const multer = require("multer");
 const fs = require("fs").promises;
 const path = require("path");
 const lockfile = require("proper-lockfile");
+const ExcelJS = require('exceljs');
 require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const CARTS_FILE = path.join(__dirname, 'carts.json');
 const PRODUCTS_FILE = path.join(__dirname, "products.json");
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 const ALLOWED_BRANDS = ["Cartier", "Bvlgari", "Van Cleef & Arpels", "Chrome Hearts", "GKH Jewelry"];
-const ALLOWED_TYPES = ["Nhẫn", "Dây chuyền", "Vòng tay", "Vòng cổ", "Khuyên tai"]; // New allowed types
+const ALLOWED_TYPES = ["Nhẫn", "Dây chuyền", "Vòng tay", "Vòng cổ", "Khuyên tai"]; // Changed to English
+const ALLOWED_MATERIALS = ["18K Gold", "24K Gold", "925 Silver", "Platinum", "Diamond"];
 
 // Middleware
 app.use(cors());
@@ -55,6 +58,12 @@ const upload = multer({
     },
     limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
 });
+
+async function backupProductsFile() {
+    const backupPath = path.join(__dirname, `products_backup_${Date.now()}.json`);
+    await fs.copyFile(PRODUCTS_FILE, backupPath);
+    console.log(`Backup created: ${backupPath}`);
+}
 
 // File lock wrapper
 async function withFileLock(operation, callback) {
@@ -119,10 +128,109 @@ app.get("/api/products", async (req, res) => {
     }
 });
 
+
+app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, res) => {
+    try {
+        if (!req.file) {
+            console.log("Validation failed: No Excel file provided");
+            return res.status(400).json({ message: 'No Excel file provided' });
+        }
+
+        // Read the uploaded Excel file
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(req.file.buffer); // Use buffer for in-memory processing
+        const worksheet = workbook.getWorksheet(1);
+        const data = [];
+
+        // Parse rows into JSON
+        worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+            if (rowNumber === 1) return; // Skip header
+            data.push({
+                Name: row.getCell(1).value,
+                Brand: row.getCell(2).value,
+                Type: row.getCell(3).value,
+                Stock: row.getCell(4).value,
+                OriginalPrice: row.getCell(5).value,
+                SalePrice: row.getCell(6).value,
+                Image: row.getCell(7).value,
+                Material: row.getCell(8).value
+            });
+        });
+
+        // Validate data
+        for (const product of data) {
+            if (!product.Name || !product.Brand || !product.Type || !product.Stock ||
+                product.OriginalPrice == null || !product.Material || !product.Image) {
+                console.log("Validation failed: Missing fields in Excel data", product);
+                return res.status(400).json({ message: 'Missing required fields in Excel data' });
+            }
+
+            const normalizedBrand = product.Brand?.toString().trim();
+            const normalizedType = product.Type?.toString().trim();
+            const normalizedMaterial = product.Material?.toString().trim();
+
+            if (!ALLOWED_BRANDS.includes(normalizedBrand)) {
+                return res.status(400).json({
+                    message: `Invalid brand: "${normalizedBrand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}`
+                });
+            }
+            if (!ALLOWED_TYPES.includes(normalizedType)) {
+                return res.status(400).json({
+                    message: `Invalid type: "${normalizedType}". Must be one of: ${ALLOWED_TYPES.join(", ")}`
+                });
+            }
+            if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
+                return res.status(400).json({
+                    message: `Invalid material: "${normalizedMaterial}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
+                });
+            }
+
+            const parsedStock = parseInt(product.Stock);
+            const parsedOriginalPrice = parseFloat(product.OriginalPrice);
+            const parsedSalePrice = parseFloat(product.SalePrice);
+
+            if (
+                isNaN(parsedStock) || parsedStock < 0 ||
+                isNaN(parsedOriginalPrice) || parsedOriginalPrice < 0 ||
+                isNaN(parsedSalePrice) || parsedSalePrice < 0
+            ) {
+                return res.status(400).json({ message: 'Invalid numeric fields in Excel data' });
+            }
+        }
+
+        // Save to products.json
+        const result = await withFileLock('upload_excel', async () => {
+            let products = [];
+            const startId = products.length ? Math.max(...products.map(p => p.id)) + 1 : 1;
+            const newProducts = data.map((product, index) => ({
+                id: startId + index,
+                name: product.Name.toString().trim(),
+                brand: product.Brand.toString().trim(),
+                type: product.Type.toString().trim(),
+                stock: parseInt(product.Stock),
+                imageUrl: product.Image.toString().trim(),
+                originalPrice: parseFloat(product.OriginalPrice),
+                salePrice: parseFloat(product.SalePrice),
+                material: product.Material.toString().trim()
+            }));
+
+            products = [...newProducts];
+            await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
+            return newProducts;
+        });
+
+        console.log("Excel processed and saved:", result);
+        res.json({ message: 'Excel file processed successfully', products: result });
+    } catch (err) {
+        console.error('Error processing Excel file:', err);
+        res.status(500).json({ message: 'Error processing Excel file' });
+    }
+});
+
 // Add a new product
 app.post("/api/products", verifyToken, upload.single("image"), async (req, res) => {
     try {
-        const { name, brand, type, stock, originalPrice, salePrice } = req.body;
+        const { name, brand, type, stock, originalPrice, salePrice, material } = req.body;
         console.log("Received FormData:", {
             name,
             brand,
@@ -130,16 +238,21 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
             stock,
             originalPrice,
             salePrice,
+            material,
             image: req.file ? req.file.filename : "No image"
         });
 
-        if (!name || !brand || !type || !stock || !originalPrice || !salePrice || !req.file) {
+        // Kiểm tra các trường bắt buộc
+        if (!name || !brand || !type || !stock || !originalPrice || !salePrice || !material || !req.file) {
             console.log("Validation failed: Missing required fields");
-            return res.status(400).json({ message: "All fields are required, including a jpg or png image file" });
+            return res.status(400).json({ message: "All fields are required, including a jpg or png image file and material" });
         }
 
+        // Kiểm tra brand, type, và material
         const normalizedBrand = brand.trim();
         const normalizedType = type.trim();
+        const normalizedMaterial = material.trim();
+
         if (!ALLOWED_BRANDS.includes(normalizedBrand)) {
             console.log("Validation failed: Invalid brand", normalizedBrand);
             return res.status(400).json({
@@ -150,6 +263,12 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
             console.log("Validation failed: Invalid type", normalizedType);
             return res.status(400).json({
                 message: `Invalid type: "${type}". Must be one of: ${ALLOWED_TYPES.join(", ")}`
+            });
+        }
+        if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
+            console.log("Validation failed: Invalid material", normalizedMaterial);
+            return res.status(400).json({
+                message: `Invalid material: "${material}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
             });
         }
 
@@ -182,11 +301,12 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
                 id: products.length ? Math.max(...products.map((p) => p.id)) + 1 : 1,
                 name,
                 brand: normalizedBrand,
-                type: normalizedType, // Store type
+                type: normalizedType,
                 stock: parsedStock,
                 imageUrl: `/backend/uploads/${req.file.filename}`,
                 originalPrice: parsedOriginalPrice,
                 salePrice: parsedSalePrice,
+                material: normalizedMaterial // Thêm trường material
             };
             products.push(newProduct);
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
@@ -201,11 +321,10 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
     }
 });
 
-// Update product
 app.patch("/api/products/:id", verifyToken, async (req, res) => {
     const { id } = req.params;
-    const { stock, originalPrice, salePrice } = req.body;
-    console.log("Updating product:", { id, stock, originalPrice, salePrice });
+    const { stock, originalPrice, salePrice, material } = req.body;
+    console.log("Updating product:", { id, stock, originalPrice, salePrice, material });
 
     try {
         const updates = {};
@@ -229,6 +348,16 @@ app.patch("/api/products/:id", verifyToken, async (req, res) => {
                 return res.status(400).json({ message: "Invalid sale price value" });
             }
             updates.salePrice = parsedSalePrice;
+        }
+        if (material !== undefined) {
+            const normalizedMaterial = material.trim();
+            if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
+                console.log("Validation failed: Invalid material", normalizedMaterial);
+                return res.status(400).json({
+                    message: `Invalid material: "${material}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
+                });
+            }
+            updates.material = normalizedMaterial;
         }
 
         if (Object.keys(updates).length === 0) {
@@ -285,6 +414,103 @@ app.delete("/api/products/:id", verifyToken, async (req, res) => {
     } catch (err) {
         console.error("Error deleting product:", err);
         res.status(500).json({ message: "Error deleting product" });
+    }
+});
+
+// Add to cart
+app.post('/api/cart', verifyToken, async (req, res) => {
+    try {
+        const { productId, quantity } = req.body;
+        const userId = req.user.userId; // From JWT
+
+        if (!productId || !quantity || quantity < 1) {
+            return res.status(400).json({ message: 'Invalid product ID or quantity' });
+        }
+
+        // Check product and stock
+        const products = JSON.parse(await fs.readFile(PRODUCTS_FILE, 'utf8'));
+        const product = products.find(p => p.id === parseInt(productId));
+        if (!product) {
+            return res.status(404).json({ message: 'Product not found' });
+        }
+        if (product.stock < quantity) {
+            return res.status(400).json({ message: 'Insufficient stock' });
+        }
+
+        // Update cart
+        const result = await withFileLock('cart', async () => {
+            let carts = [];
+            try {
+                carts = JSON.parse(await fs.readFile(CARTS_FILE, 'utf8'));
+            } catch (err) { }
+
+            let userCart = carts.find(c => c.userId === userId);
+            if (!userCart) {
+                userCart = { userId, items: [] };
+                carts.push(userCart);
+            }
+
+            const item = userCart.items.find(i => i.productId === parseInt(productId));
+            if (item) {
+                item.quantity += quantity;
+            } else {
+                userCart.items.push({ productId: parseInt(productId), quantity });
+            }
+
+            await fs.writeFile(CARTS_FILE, JSON.stringify(carts, null, 2));
+            return userCart;
+        });
+
+        res.json({ message: 'Added to cart', cart: result });
+    } catch (err) {
+        res.status(500).json({ message: 'Error updating cart' });
+    }
+});
+
+// Get all carts
+app.get('/api/cart', verifyToken, async (req, res) => {
+    try {
+        const data = await fs.readFile(CARTS_FILE, 'utf8');
+        const carts = JSON.parse(data);
+        res.json(carts);
+    } catch (err) {
+        console.error('Error reading carts:', err);
+        res.status(500).json({ message: 'Error reading carts' });
+    }
+});
+
+// Delete cart item
+app.delete('/api/cart', verifyToken, async (req, res) => {
+    const { productId } = req.body;
+    const userId = req.user.userId;
+    try {
+        const result = await withFileLock('delete_cart_item', async () => {
+            let carts = [];
+            try {
+                carts = JSON.parse(await fs.readFile(CARTS_FILE, 'utf8'));
+            } catch (err) { }
+            const userCart = carts.find(c => c.userId === userId);
+            if (!userCart) {
+                return { error: 'Cart not found' };
+            }
+            const itemIndex = userCart.items.findIndex(i => i.productId === parseInt(productId));
+            if (itemIndex === -1) {
+                return { error: 'Item not found in cart' };
+            }
+            userCart.items.splice(itemIndex, 1);
+            if (userCart.items.length === 0) {
+                carts = carts.filter(c => c.userId !== userId);
+            }
+            await fs.writeFile(CARTS_FILE, JSON.stringify(carts, null, 2));
+            return { success: true };
+        });
+        if (result.error) {
+            return res.status(404).json({ message: result.error });
+        }
+        res.json({ message: 'Item removed from cart' });
+    } catch (err) {
+        console.error('Error deleting cart item:', err);
+        res.status(500).json({ message: 'Error deleting cart item' });
     }
 });
 
