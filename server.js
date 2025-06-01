@@ -13,6 +13,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const CARTS_FILE = path.join(__dirname, 'carts.json');
 const PRODUCTS_FILE = path.join(__dirname, "products.json");
+const ORDERS_FILE = path.join(__dirname, "orders.json");
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 const ALLOWED_BRANDS = ["Cartier", "Bvlgari", "Van Cleef & Arpels", "Chrome Hearts", "GKH Jewelry"];
 const ALLOWED_TYPES = ["Nhẫn", "Dây chuyền", "Vòng tay", "Vòng cổ", "Khuyên tai"];
@@ -434,14 +435,13 @@ app.delete("/api/products/:name/:brand/:material", verifyToken, async (req, res)
 });
 
 // Add to cart
-app.post('/api/cart', verifyToken, async (req, res) => {
+app.post('/api/cart', async (req, res) => {
     try {
-        const { name, brand, material, quantity } = req.body;
-        const userId = req.user.username; // Using username from JWT
-        console.log("Adding to cart:", { name, brand, material, quantity, userId });
+        const { guestId, name, brand, material, quantity } = req.body;
+        console.log("Adding to cart:", { guestId, name, brand, material, quantity });
 
-        if (!name || !brand || !material || !quantity || quantity < 1) {
-            return res.status(400).json({ message: 'Invalid product details or quantity' });
+        if (!guestId || !name || !brand || !material || !quantity || quantity < 1) {
+            return res.status(400).json({ message: 'Invalid guest ID, product details, or quantity' });
         }
 
         // Check product and stock
@@ -459,23 +459,23 @@ app.post('/api/cart', verifyToken, async (req, res) => {
             let carts = [];
             try {
                 carts = JSON.parse(await fs.readFile(CARTS_FILE, 'utf8'));
-            } catch (err) { }
+            } catch (err) {}
 
-            let userCart = carts.find(c => c.userId === userId);
-            if (!userCart) {
-                userCart = { userId, items: [] };
-                carts.push(userCart);
+            let guestCart = carts.find(c => c.guestId === guestId);
+            if (!guestCart) {
+                guestCart = { guestId, items: [] };
+                carts.push(guestCart);
             }
 
-            const item = userCart.items.find(i => i.name === name && i.brand === brand && i.material === material);
+            const item = guestCart.items.find(i => i.name === name && i.brand === brand && i.material === material);
             if (item) {
                 item.quantity += quantity;
             } else {
-                userCart.items.push({ name, brand, material, quantity });
+                guestCart.items.push({ name, brand, material, quantity });
             }
 
             await fs.writeFile(CARTS_FILE, JSON.stringify(carts, null, 2));
-            return userCart;
+            return guestCart;
         });
 
         res.json({ message: 'Added to cart', cart: result });
@@ -485,13 +485,18 @@ app.post('/api/cart', verifyToken, async (req, res) => {
     }
 });
 
-// Get all carts
-app.get('/api/cart', verifyToken, async (req, res) => {
+// Get cart
+app.get('/api/cart', async (req, res) => {
+    const { guestId } = req.query;
+    console.log("Fetching cart for guestId:", guestId);
     try {
+        if (!guestId) {
+            return res.status(400).json({ message: 'Guest ID is required' });
+        }
         const data = await fs.readFile(CARTS_FILE, 'utf8');
         const carts = JSON.parse(data);
-        const userCart = carts.find(c => c.userId === req.user.username);
-        res.json(userCart || { userId: req.user.username, items: [] });
+        const guestCart = carts.find(c => c.guestId === guestId);
+        res.json(guestCart || { guestId, items: [] });
     } catch (err) {
         console.error('Error reading carts:', err);
         res.status(500).json({ message: 'Error reading carts' });
@@ -499,27 +504,26 @@ app.get('/api/cart', verifyToken, async (req, res) => {
 });
 
 // Delete cart item
-app.delete('/api/cart', verifyToken, async (req, res) => {
-    const { name, brand, material } = req.body;
-    const userId = req.user.username;
-    console.log("Deleting cart item:", { name, brand, material, userId });
+app.delete('/api/cart', async (req, res) => {
+    const { guestId, name, brand, material } = req.body;
+    console.log("Deleting cart item:", { guestId, name, brand, material });
     try {
         const result = await withFileLock('delete_cart_item', async () => {
             let carts = [];
             try {
                 carts = JSON.parse(await fs.readFile(CARTS_FILE, 'utf8'));
-            } catch (err) { }
-            const userCart = carts.find(c => c.userId === userId);
-            if (!userCart) {
+            } catch (err) {}
+            const guestCart = carts.find(c => c.guestId === guestId);
+            if (!guestCart) {
                 return { error: 'Cart not found' };
             }
-            const itemIndex = userCart.items.findIndex(i => i.name === name && i.brand === brand && i.material === material);
+            const itemIndex = guestCart.items.findIndex(i => i.name === name && i.brand === brand && i.material === material);
             if (itemIndex === -1) {
                 return { error: 'Item not found in cart' };
             }
-            userCart.items.splice(itemIndex, 1);
-            if (userCart.items.length === 0) {
-                carts = carts.filter(c => c.userId !== userId);
+            guestCart.items.splice(itemIndex, 1);
+            if (guestCart.items.length === 0) {
+                carts = carts.filter(c => c.guestId !== guestId);
             }
             await fs.writeFile(CARTS_FILE, JSON.stringify(carts, null, 2));
             return { success: true };
@@ -531,6 +535,96 @@ app.delete('/api/cart', verifyToken, async (req, res) => {
     } catch (err) {
         console.error('Error deleting cart item:', err);
         res.status(500).json({ message: 'Error deleting cart item' });
+    }
+});
+
+// Create order
+app.post('/api/orders', async (req, res) => {
+    const { guestId, fullName, phone, address, paymentMethod, cardNumber, expiryDate, cvv, cartItems, totalPrice } = req.body;
+    console.log("Received order:", { guestId, fullName, cartItems, totalPrice });
+
+    try {
+        // Validate order data
+        if (!guestId || !fullName || !phone || !address || !paymentMethod || !cartItems?.length || !totalPrice) {
+            console.log("Validation failed: Missing required fields");
+            return res.status(400).json({ message: "Missing required fields" });
+        }
+
+        if (paymentMethod === 'card' && (!cardNumber || !expiryDate || !cvv)) {
+            console.log("Validation failed: Missing card details");
+            return res.status(400).json({ message: "Missing card details for card payment" });
+        }
+
+        if (isNaN(totalPrice) || totalPrice <= 0) {
+            console.log("Validation failed: Invalid total price");
+            return res.status(400).json({ message: "Invalid total price" });
+        }
+
+        // Validate cart items and stock
+        const products = JSON.parse(await fs.readFile(PRODUCTS_FILE, 'utf8'));
+        for (const item of cartItems) {
+            if (!item.name || !item.brand || !item.material || !item.quantity || item.quantity < 1) {
+                console.log("Validation failed: Invalid cart item", item);
+                return res.status(400).json({ message: "Invalid cart item data" });
+            }
+            const product = products.find(p => p.name === item.name && p.brand === item.brand && p.material === item.material);
+            if (!product) {
+                console.log("Validation failed: Product not found", item);
+                return res.status(404).json({ message: `Product not found: ${item.name}, ${item.brand}, ${item.material}` });
+            }
+            if (product.stock < item.quantity) {
+                console.log("Validation failed: Insufficient stock", item);
+                return res.status(400).json({ message: `Insufficient stock for ${item.name}` });
+            }
+        }
+
+        // Process order
+        const result = await withFileLock('create_order', async () => {
+            // Update product stock
+            let productsUpdated = JSON.parse(await fs.readFile(PRODUCTS_FILE, 'utf8'));
+            for (const item of cartItems) {
+                const productIndex = productsUpdated.findIndex(p => p.name === item.name && p.brand === item.brand && p.material === item.material);
+                productsUpdated[productIndex].stock -= item.quantity;
+                if (productsUpdated[productIndex].stock === 0) {
+                    productsUpdated.splice(productIndex, 1); // Remove product if stock is zero
+                }
+            }
+            await fs.writeFile(PRODUCTS_FILE, JSON.stringify(productsUpdated, null, 2));
+
+            // Clear guest's cart
+            let carts = [];
+            try {
+                carts = JSON.parse(await fs.readFile(CARTS_FILE, 'utf8'));
+            } catch (err) {}
+            carts = carts.filter(c => c.guestId !== guestId);
+            await fs.writeFile(CARTS_FILE, JSON.stringify(carts, null, 2));
+
+            // Save order
+            let orders = [];
+            try {
+                orders = JSON.parse(await fs.readFile(ORDERS_FILE, 'utf8'));
+            } catch (err) {}
+            const newOrder = {
+                guestId,
+                fullName,
+                phone,
+                address,
+                paymentMethod,
+                cardDetails: paymentMethod === 'card' ? { cardNumber, expiryDate, cvv } : null,
+                cartItems,
+                totalPrice,
+                orderDate: new Date().toISOString()
+            };
+            orders.push(newOrder);
+            await fs.writeFile(ORDERS_FILE, JSON.stringify(orders, null, 2));
+            return newOrder;
+        });
+
+        console.log("Order created successfully:", result);
+        res.status(201).json({ message: "Order created successfully", order: result });
+    } catch (err) {
+        console.error("Error creating order:", err);
+        res.status(500).json({ message: "Error creating order" });
     }
 });
 
@@ -549,6 +643,12 @@ app.listen(PORT, async () => {
         } catch {
             await fs.writeFile(CARTS_FILE, JSON.stringify([], null, 2));
             console.log("Initialized empty carts.json");
+        }
+        try {
+            await fs.access(ORDERS_FILE);
+        } catch {
+            await fs.writeFile(ORDERS_FILE, JSON.stringify([], null, 2));
+            console.log("Initialized empty orders.json");
         }
         console.log(`Server running on http://localhost:${PORT}`);
     } catch (err) {
