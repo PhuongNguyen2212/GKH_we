@@ -15,7 +15,7 @@ const CARTS_FILE = path.join(__dirname, 'carts.json');
 const PRODUCTS_FILE = path.join(__dirname, "products.json");
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 const ALLOWED_BRANDS = ["Cartier", "Bvlgari", "Van Cleef & Arpels", "Chrome Hearts", "GKH Jewelry"];
-const ALLOWED_TYPES = ["Nhẫn", "Dây chuyền", "Vòng tay", "Vòng cổ", "Khuyên tai"]; // Changed to English
+const ALLOWED_TYPES = ["Nhẫn", "Dây chuyền", "Vòng tay", "Vòng cổ", "Khuyên tai"];
 const ALLOWED_MATERIALS = ["18K Gold", "24K Gold", "925 Silver", "Platinum", "Diamond"];
 
 // Middleware
@@ -128,7 +128,7 @@ app.get("/api/products", async (req, res) => {
     }
 });
 
-
+// Upload Excel file
 app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, res) => {
     try {
         if (!req.file) {
@@ -138,7 +138,7 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
 
         // Read the uploaded Excel file
         const workbook = new ExcelJS.Workbook();
-        await workbook.xlsx.load(req.file.buffer); // Use buffer for in-memory processing
+        await workbook.xlsx.load(req.file.buffer);
         const worksheet = workbook.getWorksheet(1);
         const data = [];
 
@@ -201,9 +201,14 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
         // Save to products.json
         const result = await withFileLock('upload_excel', async () => {
             let products = [];
-            const startId = products.length ? Math.max(...products.map(p => p.id)) + 1 : 1;
-            const newProducts = data.map((product, index) => ({
-                id: startId + index,
+            try {
+                const data = await fs.readFile(PRODUCTS_FILE, "utf8");
+                products = JSON.parse(data);
+            } catch (err) {
+                console.error("Error reading products.json:", err);
+            }
+
+            const newProducts = data.map(product => ({
                 name: product.Name.toString().trim(),
                 brand: product.Brand.toString().trim(),
                 type: product.Type.toString().trim(),
@@ -214,7 +219,14 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
                 material: product.Material.toString().trim()
             }));
 
-            products = [...newProducts];
+            // Check for duplicates
+            for (const newProduct of newProducts) {
+                if (products.some(p => p.name === newProduct.name && p.brand === newProduct.brand && p.material === newProduct.material)) {
+                    throw new Error(`Duplicate product: ${newProduct.name}, ${newProduct.brand}, ${newProduct.material}`);
+                }
+            }
+
+            products = [...products, ...newProducts];
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
             return newProducts;
         });
@@ -223,7 +235,7 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
         res.json({ message: 'Excel file processed successfully', products: result });
     } catch (err) {
         console.error('Error processing Excel file:', err);
-        res.status(500).json({ message: 'Error processing Excel file' });
+        res.status(500).json({ message: err.message || 'Error processing Excel file' });
     }
 });
 
@@ -242,13 +254,13 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
             image: req.file ? req.file.filename : "No image"
         });
 
-        // Kiểm tra các trường bắt buộc
+        // Validate required fields
         if (!name || !brand || !type || !stock || !originalPrice || !salePrice || !material || !req.file) {
             console.log("Validation failed: Missing required fields");
             return res.status(400).json({ message: "All fields are required, including a jpg or png image file and material" });
         }
 
-        // Kiểm tra brand, type, và material
+        // Validate brand, type, and material
         const normalizedBrand = brand.trim();
         const normalizedType = type.trim();
         const normalizedMaterial = material.trim();
@@ -294,11 +306,14 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
                 products = JSON.parse(data);
             } catch (err) {
                 console.error("Error reading products.json:", err);
-                products = [];
+            }
+
+            // Check for duplicate product
+            if (products.some(p => p.name === name && p.brand === normalizedBrand && p.material === normalizedMaterial)) {
+                throw new Error(`Product already exists: ${name}, ${normalizedBrand}, ${normalizedMaterial}`);
             }
 
             const newProduct = {
-                id: products.length ? Math.max(...products.map((p) => p.id)) + 1 : 1,
                 name,
                 brand: normalizedBrand,
                 type: normalizedType,
@@ -306,7 +321,7 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
                 imageUrl: `/backend/uploads/${req.file.filename}`,
                 originalPrice: parsedOriginalPrice,
                 salePrice: parsedSalePrice,
-                material: normalizedMaterial // Thêm trường material
+                material: normalizedMaterial
             };
             products.push(newProduct);
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
@@ -321,10 +336,11 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
     }
 });
 
-app.patch("/api/products/:id", verifyToken, async (req, res) => {
-    const { id } = req.params;
-    const { stock, originalPrice, salePrice, material } = req.body;
-    console.log("Updating product:", { id, stock, originalPrice, salePrice, material });
+// Update product
+app.patch("/api/products/:name/:brand/:material", verifyToken, async (req, res) => {
+    const { name, brand, material } = req.params;
+    const { stock, originalPrice, salePrice, newMaterial } = req.body;
+    console.log("Updating product:", { name, brand, material, stock, originalPrice, salePrice, newMaterial });
 
     try {
         const updates = {};
@@ -349,12 +365,12 @@ app.patch("/api/products/:id", verifyToken, async (req, res) => {
             }
             updates.salePrice = parsedSalePrice;
         }
-        if (material !== undefined) {
-            const normalizedMaterial = material.trim();
+        if (newMaterial !== undefined) {
+            const normalizedMaterial = newMaterial.trim();
             if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
                 console.log("Validation failed: Invalid material", normalizedMaterial);
                 return res.status(400).json({
-                    message: `Invalid material: "${material}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
+                    message: `Invalid material: "${newMaterial}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
                 });
             }
             updates.material = normalizedMaterial;
@@ -364,17 +380,17 @@ app.patch("/api/products/:id", verifyToken, async (req, res) => {
             return res.status(400).json({ message: "No valid fields to update" });
         }
 
-        const result = await withFileLock(`update_product_${id}`, async () => {
+        const result = await withFileLock(`update_product_${name}_${brand}_${material}`, async () => {
             const data = await fs.readFile(PRODUCTS_FILE, "utf8");
             const products = JSON.parse(data);
-            const productIndex = products.findIndex((p) => p.id === parseInt(id));
+            const productIndex = products.findIndex(p => p.name === name && p.brand === brand && p.material === material);
             if (productIndex === -1) {
                 return { error: "Product not found" };
             }
             products[productIndex] = { ...products[productIndex], ...updates };
             if (updates.stock === 0) {
                 products.splice(productIndex, 1);
-                console.log("Product deleted due to zero stock:", { id });
+                console.log("Product deleted due to zero stock:", { name, brand, material });
             }
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
             return { product: products[productIndex] || null };
@@ -391,14 +407,14 @@ app.patch("/api/products/:id", verifyToken, async (req, res) => {
 });
 
 // Delete product
-app.delete("/api/products/:id", verifyToken, async (req, res) => {
-    const { id } = req.params;
-    console.log("Deleting product:", { id });
+app.delete("/api/products/:name/:brand/:material", verifyToken, async (req, res) => {
+    const { name, brand, material } = req.params;
+    console.log("Deleting product:", { name, brand, material });
     try {
-        const result = await withFileLock(`delete_product_${id}`, async () => {
+        const result = await withFileLock(`delete_product_${name}_${brand}_${material}`, async () => {
             const data = await fs.readFile(PRODUCTS_FILE, "utf8");
             const products = JSON.parse(data);
-            const productIndex = products.findIndex((p) => p.id === parseInt(id));
+            const productIndex = products.findIndex(p => p.name === name && p.brand === brand && p.material === material);
             if (productIndex === -1) {
                 return { error: "Product not found" };
             }
@@ -420,16 +436,17 @@ app.delete("/api/products/:id", verifyToken, async (req, res) => {
 // Add to cart
 app.post('/api/cart', verifyToken, async (req, res) => {
     try {
-        const { productId, quantity } = req.body;
-        const userId = req.user.userId; // From JWT
+        const { name, brand, material, quantity } = req.body;
+        const userId = req.user.username; // Using username from JWT
+        console.log("Adding to cart:", { name, brand, material, quantity, userId });
 
-        if (!productId || !quantity || quantity < 1) {
-            return res.status(400).json({ message: 'Invalid product ID or quantity' });
+        if (!name || !brand || !material || !quantity || quantity < 1) {
+            return res.status(400).json({ message: 'Invalid product details or quantity' });
         }
 
         // Check product and stock
         const products = JSON.parse(await fs.readFile(PRODUCTS_FILE, 'utf8'));
-        const product = products.find(p => p.id === parseInt(productId));
+        const product = products.find(p => p.name === name && p.brand === brand && p.material === material);
         if (!product) {
             return res.status(404).json({ message: 'Product not found' });
         }
@@ -450,11 +467,11 @@ app.post('/api/cart', verifyToken, async (req, res) => {
                 carts.push(userCart);
             }
 
-            const item = userCart.items.find(i => i.productId === parseInt(productId));
+            const item = userCart.items.find(i => i.name === name && i.brand === brand && i.material === material);
             if (item) {
                 item.quantity += quantity;
             } else {
-                userCart.items.push({ productId: parseInt(productId), quantity });
+                userCart.items.push({ name, brand, material, quantity });
             }
 
             await fs.writeFile(CARTS_FILE, JSON.stringify(carts, null, 2));
@@ -463,6 +480,7 @@ app.post('/api/cart', verifyToken, async (req, res) => {
 
         res.json({ message: 'Added to cart', cart: result });
     } catch (err) {
+        console.error("Error updating cart:", err);
         res.status(500).json({ message: 'Error updating cart' });
     }
 });
@@ -472,7 +490,8 @@ app.get('/api/cart', verifyToken, async (req, res) => {
     try {
         const data = await fs.readFile(CARTS_FILE, 'utf8');
         const carts = JSON.parse(data);
-        res.json(carts);
+        const userCart = carts.find(c => c.userId === req.user.username);
+        res.json(userCart || { userId: req.user.username, items: [] });
     } catch (err) {
         console.error('Error reading carts:', err);
         res.status(500).json({ message: 'Error reading carts' });
@@ -481,8 +500,9 @@ app.get('/api/cart', verifyToken, async (req, res) => {
 
 // Delete cart item
 app.delete('/api/cart', verifyToken, async (req, res) => {
-    const { productId } = req.body;
-    const userId = req.user.userId;
+    const { name, brand, material } = req.body;
+    const userId = req.user.username;
+    console.log("Deleting cart item:", { name, brand, material, userId });
     try {
         const result = await withFileLock('delete_cart_item', async () => {
             let carts = [];
@@ -493,7 +513,7 @@ app.delete('/api/cart', verifyToken, async (req, res) => {
             if (!userCart) {
                 return { error: 'Cart not found' };
             }
-            const itemIndex = userCart.items.findIndex(i => i.productId === parseInt(productId));
+            const itemIndex = userCart.items.findIndex(i => i.name === name && i.brand === brand && i.material === material);
             if (itemIndex === -1) {
                 return { error: 'Item not found in cart' };
             }
@@ -523,6 +543,12 @@ app.listen(PORT, async () => {
         } catch {
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify([], null, 2));
             console.log("Initialized empty products.json");
+        }
+        try {
+            await fs.access(CARTS_FILE);
+        } catch {
+            await fs.writeFile(CARTS_FILE, JSON.stringify([], null, 2));
+            console.log("Initialized empty carts.json");
         }
         console.log(`Server running on http://localhost:${PORT}`);
     } catch (err) {
