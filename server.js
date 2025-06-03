@@ -145,7 +145,7 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
                 name,
                 brand: normalizedBrand,
                 stock: parsedStock,
-                imageUrl: `/backend/Uploads/${req.file.filename}`,
+                imageUrl: `/backend/uploads/${req.file.filename}`,
                 originalPrice: parsedOriginalPrice,
                 salePrice: parsedSalePrice,
             };
