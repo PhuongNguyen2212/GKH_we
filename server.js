@@ -129,6 +129,29 @@ app.get("/api/products", async (req, res) => {
     }
 });
 
+// Get specific product
+app.get("/api/products/:name/:brand/:material", async (req, res) => {
+    const { name, brand, material } = req.params;
+    console.log("Fetching product:", { name, brand, material });
+    try {
+        const data = await fs.readFile(PRODUCTS_FILE, "utf8");
+        const products = JSON.parse(data);
+        const product = products.find(
+            p => p.name === decodeURIComponent(name) &&
+                 p.brand === decodeURIComponent(brand) &&
+                 p.material === decodeURIComponent(material)
+        );
+        if (!product) {
+            console.log("Product not found:", { name, brand, material });
+            return res.status(404).json({ message: "Product not found" });
+        }
+        res.json(product);
+    } catch (err) {
+        console.error("Error reading product:", err);
+        res.status(500).json({ message: "Error reading product" });
+    }
+});
+
 // Upload Excel file
 app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, res) => {
     try {
@@ -244,7 +267,7 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
 app.post("/api/products", verifyToken, upload.single("image"), async (req, res) => {
     try {
         const { name, brand, type, stock, originalPrice, salePrice, material } = req.body;
-        console.log("Received FormData:", {
+        console.log("Received FormData for new product:", {
             name,
             brand,
             type,
@@ -256,8 +279,8 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
         });
 
         // Validate required fields
-        if (!name || !brand || !type || !stock || !originalPrice || !salePrice || !material || !req.file) {
-            console.log("Validation failed: Missing required fields");
+        if (!name || !brand || !type || !stock || !originalPrice || !material || !req.file) {
+            console.log("Validation failed: Missing required fields", { name, brand, type, stock, originalPrice, material, file: !!req.file });
             return res.status(400).json({ message: "All fields are required, including a jpg or png image file and material" });
         }
 
@@ -269,25 +292,25 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
         if (!ALLOWED_BRANDS.includes(normalizedBrand)) {
             console.log("Validation failed: Invalid brand", normalizedBrand);
             return res.status(400).json({
-                message: `Invalid brand: "${brand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}`
+                message: `Invalid brand: "${normalizedBrand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}`
             });
         }
         if (!ALLOWED_TYPES.includes(normalizedType)) {
             console.log("Validation failed: Invalid type", normalizedType);
             return res.status(400).json({
-                message: `Invalid type: "${type}". Must be one of: ${ALLOWED_TYPES.join(", ")}`
+                message: `Invalid type: "${normalizedType}". Must be one of: ${ALLOWED_TYPES.join(", ")}`
             });
         }
         if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
             console.log("Validation failed: Invalid material", normalizedMaterial);
             return res.status(400).json({
-                message: `Invalid material: "${material}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
+                message: `Invalid material: "${normalizedMaterial}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
             });
         }
 
         const parsedStock = parseInt(stock);
         const parsedOriginalPrice = parseFloat(originalPrice);
-        const parsedSalePrice = parseFloat(salePrice);
+        const parsedSalePrice = parseFloat(salePrice || "0");
 
         console.log("Parsed values:", { parsedStock, parsedOriginalPrice, parsedSalePrice });
 
@@ -310,12 +333,12 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
             }
 
             // Check for duplicate product
-            if (products.some(p => p.name === name && p.brand === normalizedBrand && p.material === normalizedMaterial)) {
-                throw new Error(`Product already exists: ${name}, ${normalizedBrand}, ${normalizedMaterial}`);
+            if (products.some(p => p.name === name.trim() && p.brand === normalizedBrand && p.material === normalizedMaterial)) {
+                throw new Error(`Product already exists: ${name.trim()}, ${normalizedBrand}, ${normalizedMaterial}`);
             }
 
             const newProduct = {
-                name,
+                name: name.trim(),
                 brand: normalizedBrand,
                 type: normalizedType,
                 stock: parsedStock,
@@ -333,15 +356,15 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
         res.status(201).json(newProduct);
     } catch (err) {
         console.error("Error adding product:", err);
-        res.status(500).json({ message: err.message || "Error adding product" });
+        res.status(400).json({ message: err.message || "Error adding product" });
     }
 });
 
 // Update product
-app.patch("/api/products/:name/:brand/:material", verifyToken, async (req, res) => {
+app.patch("/api/products/:name/:brand/:material", verifyToken, upload.single("image"), async (req, res) => {
     const { name, brand, material } = req.params;
-    const { stock, originalPrice, salePrice, newMaterial } = req.body;
-    console.log("Updating product:", { name, brand, material, stock, originalPrice, salePrice, newMaterial });
+    const { stock, originalPrice, salePrice, newMaterial, newName, newBrand, newType } = req.body;
+    console.log("Updating product:", { name, brand, material, stock, originalPrice, salePrice, newMaterial, newName, newBrand, newType, image: req.file ? req.file.filename : "No image" });
 
     try {
         const updates = {};
@@ -371,10 +394,40 @@ app.patch("/api/products/:name/:brand/:material", verifyToken, async (req, res) 
             if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
                 console.log("Validation failed: Invalid material", normalizedMaterial);
                 return res.status(400).json({
-                    message: `Invalid material: "${newMaterial}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
+                    message: `Invalid material: "${normalizedMaterial}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
                 });
             }
             updates.material = normalizedMaterial;
+        }
+        if (newName !== undefined) {
+            const normalizedName = newName.trim();
+            if (!normalizedName) {
+                return res.status(400).json({ message: "Invalid name value" });
+            }
+            updates.name = normalizedName;
+        }
+        if (newBrand !== undefined) {
+            const normalizedBrand = newBrand.trim();
+            if (!ALLOWED_BRANDS.includes(normalizedBrand)) {
+                console.log("Validation failed: Invalid brand", normalizedBrand);
+                return res.status(400).json({
+                    message: `Invalid brand: "${normalizedBrand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}`
+                });
+            }
+            updates.brand = normalizedBrand;
+        }
+        if (newType !== undefined) {
+            const normalizedType = newType.trim();
+            if (!ALLOWED_TYPES.includes(normalizedType)) {
+                console.log("Validation failed: Invalid type", normalizedType);
+                return res.status(400).json({
+                    message: `Invalid type: "${normalizedType}". Must be one of: ${ALLOWED_TYPES.join(", ")}`
+                });
+            }
+            updates.type = normalizedType;
+        }
+        if (req.file) {
+            updates.imageUrl = `/backend/uploads/${req.file.filename}`;
         }
 
         if (Object.keys(updates).length === 0) {
@@ -383,11 +436,29 @@ app.patch("/api/products/:name/:brand/:material", verifyToken, async (req, res) 
 
         const result = await withFileLock(`update_product_${name}_${brand}_${material}`, async () => {
             const data = await fs.readFile(PRODUCTS_FILE, "utf8");
-            const products = JSON.parse(data);
-            const productIndex = products.findIndex(p => p.name === name && p.brand === brand && p.material === material);
+            let products = JSON.parse(data);
+            const productIndex = products.findIndex(p => 
+                p.name === decodeURIComponent(name) && 
+                p.brand === decodeURIComponent(brand) && 
+                p.material === decodeURIComponent(material)
+            );
             if (productIndex === -1) {
                 return { error: "Product not found" };
             }
+
+            // Check for duplicate product if key fields are updated
+            const updatedName = updates.name || products[productIndex].name;
+            const updatedBrand = updates.brand || products[productIndex].brand;
+            const updatedMaterial = updates.material || products[productIndex].material;
+            if (products.some((p, i) => 
+                i !== productIndex && 
+                p.name === updatedName && 
+                p.brand === updatedBrand && 
+                p.material === updatedMaterial
+            )) {
+                throw new Error(`Duplicate product: ${updatedName}, ${updatedBrand}, ${updatedMaterial}`);
+            }
+
             products[productIndex] = { ...products[productIndex], ...updates };
             if (updates.stock === 0) {
                 products.splice(productIndex, 1);
@@ -403,7 +474,7 @@ app.patch("/api/products/:name/:brand/:material", verifyToken, async (req, res) 
         res.json(result.product || { message: "Product deleted due to zero stock" });
     } catch (err) {
         console.error("Error updating product:", err);
-        res.status(500).json({ message: "Error updating product" });
+        res.status(400).json({ message: err.message || "Error updating product" });
     }
 });
 
@@ -414,8 +485,12 @@ app.delete("/api/products/:name/:brand/:material", verifyToken, async (req, res)
     try {
         const result = await withFileLock(`delete_product_${name}_${brand}_${material}`, async () => {
             const data = await fs.readFile(PRODUCTS_FILE, "utf8");
-            const products = JSON.parse(data);
-            const productIndex = products.findIndex(p => p.name === name && p.brand === brand && p.material === material);
+            let products = JSON.parse(data);
+            const productIndex = products.findIndex(p => 
+                p.name === decodeURIComponent(name) && 
+                p.brand === decodeURIComponent(brand) && 
+                p.material === decodeURIComponent(material)
+            );
             if (productIndex === -1) {
                 return { error: "Product not found" };
             }
