@@ -66,7 +66,27 @@ async function backupProductsFile() {
     console.log(`Backup created: ${backupPath}`);
 }
 
-// File lock wrapper
+async function cleanProductsFile() {
+    try {
+        const data = await fs.readFile(PRODUCTS_FILE, 'utf8');
+        let products = JSON.parse(data);
+        products = products.map(p => ({
+            ...p,
+            name: p.name.trim(),
+            brand: p.brand.trim(),
+            type: p.type.trim(),
+            material: p.material.trim()
+        }));
+        await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
+        console.log('Cleaned products.json');
+    } catch (err) {
+        console.error('Error cleaning products.json:', err);
+    }
+}
+
+// Run cleanup once on server start
+cleanProductsFile();
+
 async function withFileLock(operation, callback) {
     console.log(`Starting operation: ${operation}`);
     try {
@@ -122,6 +142,7 @@ app.get("/api/products", async (req, res) => {
     try {
         const data = await fs.readFile(PRODUCTS_FILE, "utf8");
         const products = JSON.parse(data);
+        console.log("Products fetched:", products);
         res.json(products);
     } catch (err) {
         console.error("Error reading products:", err);
@@ -132,18 +153,22 @@ app.get("/api/products", async (req, res) => {
 // Get specific product
 app.get("/api/products/:name/:brand/:material", async (req, res) => {
     const { name, brand, material } = req.params;
-    console.log("Fetching product:", { name, brand, material });
+    const decodedName = decodeURIComponent(name);
+    const decodedBrand = decodeURIComponent(brand);
+    const decodedMaterial = decodeURIComponent(material);
+    console.log("Fetching product:", { name: decodedName, brand: decodedBrand, material: decodedMaterial });
     try {
         const data = await fs.readFile(PRODUCTS_FILE, "utf8");
         const products = JSON.parse(data);
+        console.log("Products in file:", products);
         const product = products.find(
-            p => p.name === decodeURIComponent(name) &&
-                 p.brand === decodeURIComponent(brand) &&
-                 p.material === decodeURIComponent(material)
+            p => p.name === decodedName &&
+                p.brand === decodedBrand &&
+                p.material === decodedMaterial
         );
         if (!product) {
-            console.log("Product not found:", { name, brand, material });
-            return res.status(404).json({ message: "Product not found" });
+            console.log("Product not found:", { name: decodedName, brand: decodedBrand, material: decodedMaterial });
+            return res.status(404).json({ message: `Product not found: ${decodedName}, ${decodedBrand}, ${decodedMaterial}` });
         }
         res.json(product);
     } catch (err) {
@@ -160,15 +185,13 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
             return res.status(400).json({ message: 'No Excel file provided' });
         }
 
-        // Read the uploaded Excel file
         const workbook = new ExcelJS.Workbook();
         await workbook.xlsx.load(req.file.buffer);
         const worksheet = workbook.getWorksheet(1);
         const data = [];
 
-        // Parse rows into JSON
         worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-            if (rowNumber === 1) return; // Skip header
+            if (rowNumber === 1) return;
             data.push({
                 Name: row.getCell(1).value,
                 Brand: row.getCell(2).value,
@@ -181,7 +204,6 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
             });
         });
 
-        // Validate data
         for (const product of data) {
             if (!product.Name || !product.Brand || !product.Type || !product.Stock ||
                 product.OriginalPrice == null || !product.Material || !product.Image) {
@@ -222,7 +244,6 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
             }
         }
 
-        // Save to products.json
         const result = await withFileLock('upload_excel', async () => {
             let products = [];
             try {
@@ -243,7 +264,6 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
                 material: product.Material.toString().trim()
             }));
 
-            // Check for duplicates
             for (const newProduct of newProducts) {
                 if (products.some(p => p.name === newProduct.name && p.brand === newProduct.brand && p.material === newProduct.material)) {
                     throw new Error(`Duplicate product: ${newProduct.name}, ${newProduct.brand}, ${newProduct.material}`);
@@ -278,13 +298,11 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
             image: req.file ? req.file.filename : "No image"
         });
 
-        // Validate required fields
         if (!name || !brand || !type || !stock || !originalPrice || !material || !req.file) {
             console.log("Validation failed: Missing required fields", { name, brand, type, stock, originalPrice, material, file: !!req.file });
             return res.status(400).json({ message: "All fields are required, including a jpg or png image file and material" });
         }
 
-        // Validate brand, type, and material
         const normalizedBrand = brand.trim();
         const normalizedType = type.trim();
         const normalizedMaterial = material.trim();
@@ -332,7 +350,6 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
                 console.error("Error reading products.json:", err);
             }
 
-            // Check for duplicate product
             if (products.some(p => p.name === name.trim() && p.brand === normalizedBrand && p.material === normalizedMaterial)) {
                 throw new Error(`Product already exists: ${name.trim()}, ${normalizedBrand}, ${normalizedMaterial}`);
             }
@@ -363,8 +380,23 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
 // Update product
 app.patch("/api/products/:name/:brand/:material", verifyToken, upload.single("image"), async (req, res) => {
     const { name, brand, material } = req.params;
+    const decodedName = decodeURIComponent(name);
+    const decodedBrand = decodeURIComponent(brand);
+    const decodedMaterial = decodeURIComponent(material);
     const { stock, originalPrice, salePrice, newMaterial, newName, newBrand, newType } = req.body;
-    console.log("Updating product:", { name, brand, material, stock, originalPrice, salePrice, newMaterial, newName, newBrand, newType, image: req.file ? req.file.filename : "No image" });
+    console.log("Updating product:", { 
+        name: decodedName, 
+        brand: decodedBrand, 
+        material: decodedMaterial, 
+        stock, 
+        originalPrice, 
+        salePrice, 
+        newMaterial, 
+        newName, 
+        newBrand, 
+        newType, 
+        image: req.file ? req.file.filename : "No image" 
+    });
 
     try {
         const updates = {};
@@ -434,26 +466,27 @@ app.patch("/api/products/:name/:brand/:material", verifyToken, upload.single("im
             return res.status(400).json({ message: "No valid fields to update" });
         }
 
-        const result = await withFileLock(`update_product_${name}_${brand}_${material}`, async () => {
+        const result = await withFileLock(`update_product_${decodedName}_${decodedBrand}_${decodedMaterial}`, async () => {
             const data = await fs.readFile(PRODUCTS_FILE, "utf8");
             let products = JSON.parse(data);
-            const productIndex = products.findIndex(p => 
-                p.name === decodeURIComponent(name) && 
-                p.brand === decodeURIComponent(brand) && 
-                p.material === decodeURIComponent(material)
+            console.log("Products in file:", products);
+            const productIndex = products.findIndex(p =>
+                p.name === decodedName &&
+                p.brand === decodedBrand &&
+                p.material === decodedMaterial
             );
             if (productIndex === -1) {
-                return { error: "Product not found" };
+                console.log("Product not found:", { name: decodedName, brand: decodedBrand, material: decodedMaterial });
+                return { error: `Product not found: ${decodedName}, ${decodedBrand}, ${decodedMaterial}` };
             }
 
-            // Check for duplicate product if key fields are updated
             const updatedName = updates.name || products[productIndex].name;
             const updatedBrand = updates.brand || products[productIndex].brand;
             const updatedMaterial = updates.material || products[productIndex].material;
-            if (products.some((p, i) => 
-                i !== productIndex && 
-                p.name === updatedName && 
-                p.brand === updatedBrand && 
+            if (products.some((p, i) =>
+                i !== productIndex &&
+                p.name === updatedName &&
+                p.brand === updatedBrand &&
                 p.material === updatedMaterial
             )) {
                 throw new Error(`Duplicate product: ${updatedName}, ${updatedBrand}, ${updatedMaterial}`);
@@ -462,7 +495,7 @@ app.patch("/api/products/:name/:brand/:material", verifyToken, upload.single("im
             products[productIndex] = { ...products[productIndex], ...updates };
             if (updates.stock === 0) {
                 products.splice(productIndex, 1);
-                console.log("Product deleted due to zero stock:", { name, brand, material });
+                console.log("Product deleted due to zero stock:", { name: decodedName, brand: decodedBrand, material: decodedMaterial });
             }
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
             return { product: products[productIndex] || null };
@@ -481,18 +514,23 @@ app.patch("/api/products/:name/:brand/:material", verifyToken, upload.single("im
 // Delete product
 app.delete("/api/products/:name/:brand/:material", verifyToken, async (req, res) => {
     const { name, brand, material } = req.params;
-    console.log("Deleting product:", { name, brand, material });
+    const decodedName = decodeURIComponent(name);
+    const decodedBrand = decodeURIComponent(brand);
+    const decodedMaterial = decodeURIComponent(material);
+    console.log("Deleting product:", { name: decodedName, brand: decodedBrand, material: decodedMaterial });
     try {
-        const result = await withFileLock(`delete_product_${name}_${brand}_${material}`, async () => {
+        const result = await withFileLock(`delete_product_${decodedName}_${decodedBrand}_${decodedMaterial}`, async () => {
             const data = await fs.readFile(PRODUCTS_FILE, "utf8");
             let products = JSON.parse(data);
-            const productIndex = products.findIndex(p => 
-                p.name === decodeURIComponent(name) && 
-                p.brand === decodeURIComponent(brand) && 
-                p.material === decodeURIComponent(material)
+            console.log("Products in file:", products);
+            const productIndex = products.findIndex(p =>
+                p.name === decodedName &&
+                p.brand === decodedBrand &&
+                p.material === decodedMaterial
             );
             if (productIndex === -1) {
-                return { error: "Product not found" };
+                console.log("Product not found:", { name: decodedName, brand: decodedBrand, material: decodedMaterial });
+                return { error: `Product not found: ${decodedName}, ${decodedBrand}, ${decodedMaterial}` };
             }
             const [deletedProduct] = products.splice(productIndex, 1);
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
@@ -519,22 +557,20 @@ app.post('/api/cart', async (req, res) => {
             return res.status(400).json({ message: 'Invalid guest ID, product details, or quantity' });
         }
 
-        // Check product and stock
         const products = JSON.parse(await fs.readFile(PRODUCTS_FILE, 'utf8'));
         const product = products.find(p => p.name === name && p.brand === brand && p.material === material);
         if (!product) {
-            return res.status(404).json({ message: 'Product not found' });
+            return res.status(404).json({ message: `Product not found: ${name}, ${brand}, ${material}` });
         }
         if (product.stock < quantity) {
-            return res.status(400).json({ message: 'Insufficient stock' });
+            return res.status(400).json({ message: `Insufficient stock for ${name}` });
         }
 
-        // Update cart
         const result = await withFileLock('cart', async () => {
             let carts = [];
             try {
                 carts = JSON.parse(await fs.readFile(CARTS_FILE, 'utf8'));
-            } catch (err) {}
+            } catch (err) { }
 
             let guestCart = carts.find(c => c.guestId === guestId);
             if (!guestCart) {
@@ -587,7 +623,7 @@ app.delete('/api/cart', async (req, res) => {
             let carts = [];
             try {
                 carts = JSON.parse(await fs.readFile(CARTS_FILE, 'utf8'));
-            } catch (err) {}
+            } catch (err) { }
             const guestCart = carts.find(c => c.guestId === guestId);
             if (!guestCart) {
                 return { error: 'Cart not found' };
@@ -619,7 +655,6 @@ app.post('/api/orders', async (req, res) => {
     console.log("Received order:", { guestId, fullName, cartItems, totalPrice });
 
     try {
-        // Validate order data
         if (!guestId || !fullName || !phone || !address || !paymentMethod || !cartItems?.length || !totalPrice) {
             console.log("Validation failed: Missing required fields");
             return res.status(400).json({ message: "Missing required fields" });
@@ -635,7 +670,6 @@ app.post('/api/orders', async (req, res) => {
             return res.status(400).json({ message: "Invalid total price" });
         }
 
-        // Validate cart items and stock
         const products = JSON.parse(await fs.readFile(PRODUCTS_FILE, 'utf8'));
         for (const item of cartItems) {
             if (!item.name || !item.brand || !item.material || !item.quantity || item.quantity < 1) {
@@ -653,32 +687,28 @@ app.post('/api/orders', async (req, res) => {
             }
         }
 
-        // Process order
         const result = await withFileLock('create_order', async () => {
-            // Update product stock
             let productsUpdated = JSON.parse(await fs.readFile(PRODUCTS_FILE, 'utf8'));
             for (const item of cartItems) {
                 const productIndex = productsUpdated.findIndex(p => p.name === item.name && p.brand === item.brand && p.material === item.material);
                 productsUpdated[productIndex].stock -= item.quantity;
                 if (productsUpdated[productIndex].stock === 0) {
-                    productsUpdated.splice(productIndex, 1); // Remove product if stock is zero
+                    productsUpdated.splice(productIndex, 1);
                 }
             }
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(productsUpdated, null, 2));
 
-            // Clear guest's cart
             let carts = [];
             try {
                 carts = JSON.parse(await fs.readFile(CARTS_FILE, 'utf8'));
-            } catch (err) {}
+            } catch (err) { }
             carts = carts.filter(c => c.guestId !== guestId);
             await fs.writeFile(CARTS_FILE, JSON.stringify(carts, null, 2));
 
-            // Save order
             let orders = [];
             try {
                 orders = JSON.parse(await fs.readFile(ORDERS_FILE, 'utf8'));
-            } catch (err) {}
+            } catch (err) { }
             const newOrder = {
                 guestId,
                 fullName,
