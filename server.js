@@ -13,13 +13,16 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const CARTS_FILE = path.join(__dirname, 'carts.json');
 const PRODUCTS_FILE = path.join(__dirname, "products.json");
-const UPLOADS_DIR = path.join(__dirname, "uploads");
+const UPLOADS_DIR = path.join(__dirname, "Uploads");
 const ALLOWED_BRANDS = ["Cartier", "Bvlgari", "Van Cleef & Arpels", "Chrome Hearts", "GKH Jewelry"];
-const ALLOWED_TYPES = ["Nhẫn", "Dây chuyền", "Vòng tay", "Vòng cổ", "Khuyên tai"]; // Changed to English
+const ALLOWED_TYPES = ["Nhẫn", "Dây chuyền", "Vòng tay", "Vòng cổ", "Khuyên tai"];
 const ALLOWED_MATERIALS = ["18K Gold", "24K Gold", "925 Silver", "Platinum", "Diamond"];
 
 // Middleware
-app.use(cors());
+app.use(cors({
+    origin: ["http://localhost:3000", "https://your-frontend-domain.com"], // Replace with your frontend URL
+    credentials: true
+}));
 app.use(express.json());
 app.use("/backend/uploads", express.static(UPLOADS_DIR, {
     setHeaders: (res, path) => {
@@ -124,11 +127,11 @@ app.get("/api/products", async (req, res) => {
         res.json(products);
     } catch (err) {
         console.error("Error reading products:", err);
-        res.status(500).json({ message: "Error reading products" });
+        res.status(500).json({ message: `Error reading products: ${err.message}` });
     }
 });
 
-
+// Upload Excel file
 app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, res) => {
     try {
         if (!req.file) {
@@ -136,13 +139,11 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
             return res.status(400).json({ message: 'No Excel file provided' });
         }
 
-        // Read the uploaded Excel file
         const workbook = new ExcelJS.Workbook();
-        await workbook.xlsx.load(req.file.buffer); // Use buffer for in-memory processing
+        await workbook.xlsx.load(req.file.buffer);
         const worksheet = workbook.getWorksheet(1);
         const data = [];
 
-        // Parse rows into JSON
         worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
             if (rowNumber === 1) return; // Skip header
             data.push({
@@ -153,11 +154,10 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
                 OriginalPrice: row.getCell(5).value,
                 SalePrice: row.getCell(6).value,
                 Image: row.getCell(7).value,
-                Material: row.getCell(8).value
+                Material: row.getCell(8).value || ALLOWED_MATERIALS[0] // Default to "18K Gold"
             });
         });
 
-        // Validate data
         for (const product of data) {
             if (!product.Name || !product.Brand || !product.Type || !product.Stock ||
                 product.OriginalPrice == null || !product.Material || !product.Image) {
@@ -198,9 +198,16 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
             }
         }
 
-        // Save to products.json
         const result = await withFileLock('upload_excel', async () => {
             let products = [];
+            try {
+                const data = await fs.readFile(PRODUCTS_FILE, "utf8");
+                products = JSON.parse(data);
+            } catch (err) {
+                console.error("Error reading products.json:", err);
+                products = [];
+            }
+
             const startId = products.length ? Math.max(...products.map(p => p.id)) + 1 : 1;
             const newProducts = data.map((product, index) => ({
                 id: startId + index,
@@ -214,7 +221,7 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
                 material: product.Material.toString().trim()
             }));
 
-            products = [...newProducts];
+            products = [...products, ...newProducts];
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
             return newProducts;
         });
@@ -223,7 +230,7 @@ app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, r
         res.json({ message: 'Excel file processed successfully', products: result });
     } catch (err) {
         console.error('Error processing Excel file:', err);
-        res.status(500).json({ message: 'Error processing Excel file' });
+        res.status(500).json({ message: `Error processing Excel file: ${err.message}` });
     }
 });
 
@@ -242,13 +249,11 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
             image: req.file ? req.file.filename : "No image"
         });
 
-        // Kiểm tra các trường bắt buộc
         if (!name || !brand || !type || !stock || !originalPrice || !salePrice || !material || !req.file) {
             console.log("Validation failed: Missing required fields");
             return res.status(400).json({ message: "All fields are required, including a jpg or png image file and material" });
         }
 
-        // Kiểm tra brand, type, và material
         const normalizedBrand = brand.trim();
         const normalizedType = type.trim();
         const normalizedMaterial = material.trim();
@@ -306,7 +311,7 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
                 imageUrl: `/backend/uploads/${req.file.filename}`,
                 originalPrice: parsedOriginalPrice,
                 salePrice: parsedSalePrice,
-                material: normalizedMaterial // Thêm trường material
+                material: normalizedMaterial
             };
             products.push(newProduct);
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
@@ -317,17 +322,39 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
         res.status(201).json(newProduct);
     } catch (err) {
         console.error("Error adding product:", err);
-        res.status(500).json({ message: err.message || "Error adding product" });
+        res.status(500).json({ message: `Error adding product: ${err.message}` });
     }
 });
 
-app.patch("/api/products/:id", verifyToken, async (req, res) => {
+// Update a product
+app.patch("/api/products/:id", verifyToken, upload.single("image"), async (req, res) => {
     const { id } = req.params;
-    const { stock, originalPrice, salePrice, material } = req.body;
-    console.log("Updating product:", { id, stock, originalPrice, salePrice, material });
+    const { name, brand, type, stock, originalPrice, salePrice, material } = req.body;
+    console.log("Updating product:", { id, name, brand, type, stock, originalPrice, salePrice, material });
 
     try {
         const updates = {};
+        if (name !== undefined) updates.name = name.trim();
+        if (brand !== undefined) {
+            const normalizedBrand = brand.trim();
+            if (!ALLOWED_BRANDS.includes(normalizedBrand)) {
+                console.log("Validation failed: Invalid brand", normalizedBrand);
+                return res.status(400).json({
+                    message: `Invalid brand: "${brand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}`
+                });
+            }
+            updates.brand = normalizedBrand;
+        }
+        if (type !== undefined) {
+            const normalizedType = type.trim();
+            if (!ALLOWED_TYPES.includes(normalizedType)) {
+                console.log("Validation failed: Invalid type", normalizedType);
+                return res.status(400).json({
+                    message: `Invalid type: "${type}". Must be one of: ${ALLOWED_TYPES.join(", ")}`
+                });
+            }
+            updates.type = normalizedType;
+        }
         if (stock !== undefined) {
             const parsedStock = parseInt(stock);
             if (isNaN(parsedStock) || parsedStock < 0) {
@@ -349,7 +376,7 @@ app.patch("/api/products/:id", verifyToken, async (req, res) => {
             }
             updates.salePrice = parsedSalePrice;
         }
-        if (material !== undefined) {
+        if (material !== undefined && material !== "") {
             const normalizedMaterial = material.trim();
             if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
                 console.log("Validation failed: Invalid material", normalizedMaterial);
@@ -358,6 +385,11 @@ app.patch("/api/products/:id", verifyToken, async (req, res) => {
                 });
             }
             updates.material = normalizedMaterial;
+        } else if (material === "") {
+            updates.material = ALLOWED_MATERIALS[0]; // Default to "18K Gold"
+        }
+        if (req.file) {
+            updates.imageUrl = `/backend/uploads/${req.file.filename}`;
         }
 
         if (Object.keys(updates).length === 0) {
@@ -365,12 +397,25 @@ app.patch("/api/products/:id", verifyToken, async (req, res) => {
         }
 
         const result = await withFileLock(`update_product_${id}`, async () => {
-            const data = await fs.readFile(PRODUCTS_FILE, "utf8");
-            const products = JSON.parse(data);
+            let products = [];
+            try {
+                const data = await fs.readFile(PRODUCTS_FILE, "utf8");
+                products = JSON.parse(data);
+            } catch (err) {
+                console.error("Error reading products.json:", err);
+                throw new Error("Failed to read products file");
+            }
+
             const productIndex = products.findIndex((p) => p.id === parseInt(id));
             if (productIndex === -1) {
                 return { error: "Product not found" };
             }
+
+            // Ensure existing product has material field
+            if (!products[productIndex].material) {
+                products[productIndex].material = ALLOWED_MATERIALS[0]; // Default to "18K Gold"
+            }
+
             products[productIndex] = { ...products[productIndex], ...updates };
             if (updates.stock === 0) {
                 products.splice(productIndex, 1);
@@ -386,7 +431,7 @@ app.patch("/api/products/:id", verifyToken, async (req, res) => {
         res.json(result.product || { message: "Product deleted due to zero stock" });
     } catch (err) {
         console.error("Error updating product:", err);
-        res.status(500).json({ message: "Error updating product" });
+        res.status(500).json({ message: `Error updating product: ${err.message}` });
     }
 });
 
@@ -396,8 +441,15 @@ app.delete("/api/products/:id", verifyToken, async (req, res) => {
     console.log("Deleting product:", { id });
     try {
         const result = await withFileLock(`delete_product_${id}`, async () => {
-            const data = await fs.readFile(PRODUCTS_FILE, "utf8");
-            const products = JSON.parse(data);
+            let products = [];
+            try {
+                const data = await fs.readFile(PRODUCTS_FILE, "utf8");
+                products = JSON.parse(data);
+            } catch (err) {
+                console.error("Error reading products.json:", err);
+                throw new Error("Failed to read products file");
+            }
+
             const productIndex = products.findIndex((p) => p.id === parseInt(id));
             if (productIndex === -1) {
                 return { error: "Product not found" };
@@ -413,7 +465,7 @@ app.delete("/api/products/:id", verifyToken, async (req, res) => {
         res.json({ message: "Product deleted successfully" });
     } catch (err) {
         console.error("Error deleting product:", err);
-        res.status(500).json({ message: "Error deleting product" });
+        res.status(500).json({ message: `Error deleting product: ${err.message}` });
     }
 });
 
@@ -421,14 +473,22 @@ app.delete("/api/products/:id", verifyToken, async (req, res) => {
 app.post('/api/cart', verifyToken, async (req, res) => {
     try {
         const { productId, quantity } = req.body;
-        const userId = req.user.userId; // From JWT
+        const userId = req.user.username; // Changed from userId to username to match JWT payload
+        console.log("Adding to cart:", { userId, productId, quantity });
 
         if (!productId || !quantity || quantity < 1) {
             return res.status(400).json({ message: 'Invalid product ID or quantity' });
         }
 
-        // Check product and stock
-        const products = JSON.parse(await fs.readFile(PRODUCTS_FILE, 'utf8'));
+        let products = [];
+        try {
+            const data = await fs.readFile(PRODUCTS_FILE, 'utf8');
+            products = JSON.parse(data);
+        } catch (err) {
+            console.error("Error reading products.json:", err);
+            return res.status(500).json({ message: 'Error reading products' });
+        }
+
         const product = products.find(p => p.id === parseInt(productId));
         if (!product) {
             return res.status(404).json({ message: 'Product not found' });
@@ -437,12 +497,14 @@ app.post('/api/cart', verifyToken, async (req, res) => {
             return res.status(400).json({ message: 'Insufficient stock' });
         }
 
-        // Update cart
         const result = await withFileLock('cart', async () => {
             let carts = [];
             try {
-                carts = JSON.parse(await fs.readFile(CARTS_FILE, 'utf8'));
-            } catch (err) { }
+                const data = await fs.readFile(CARTS_FILE, 'utf8');
+                carts = JSON.parse(data);
+            } catch (err) {
+                console.error("Error reading carts.json:", err);
+            }
 
             let userCart = carts.find(c => c.userId === userId);
             if (!userCart) {
@@ -463,32 +525,43 @@ app.post('/api/cart', verifyToken, async (req, res) => {
 
         res.json({ message: 'Added to cart', cart: result });
     } catch (err) {
-        res.status(500).json({ message: 'Error updating cart' });
+        console.error("Error updating cart:", err);
+        res.status(500).json({ message: `Error updating cart: ${err.message}` });
     }
 });
 
 // Get all carts
 app.get('/api/cart', verifyToken, async (req, res) => {
     try {
-        const data = await fs.readFile(CARTS_FILE, 'utf8');
-        const carts = JSON.parse(data);
+        let carts = [];
+        try {
+            const data = await fs.readFile(CARTS_FILE, 'utf8');
+            carts = JSON.parse(data);
+        } catch (err) {
+            console.error("Error reading carts.json:", err);
+        }
         res.json(carts);
     } catch (err) {
         console.error('Error reading carts:', err);
-        res.status(500).json({ message: 'Error reading carts' });
+        res.status(500).json({ message: `Error reading carts: ${err.message}` });
     }
 });
 
 // Delete cart item
 app.delete('/api/cart', verifyToken, async (req, res) => {
     const { productId } = req.body;
-    const userId = req.user.userId;
+    const userId = req.user.username; // Changed from userId to username to match JWT payload
+    console.log("Deleting cart item:", { userId, productId });
     try {
         const result = await withFileLock('delete_cart_item', async () => {
             let carts = [];
             try {
-                carts = JSON.parse(await fs.readFile(CARTS_FILE, 'utf8'));
-            } catch (err) { }
+                const data = await fs.readFile(CARTS_FILE, 'utf8');
+                carts = JSON.parse(data);
+            } catch (err) {
+                console.error("Error reading carts.json:", err);
+            }
+
             const userCart = carts.find(c => c.userId === userId);
             if (!userCart) {
                 return { error: 'Cart not found' };
@@ -504,14 +577,21 @@ app.delete('/api/cart', verifyToken, async (req, res) => {
             await fs.writeFile(CARTS_FILE, JSON.stringify(carts, null, 2));
             return { success: true };
         });
+
         if (result.error) {
             return res.status(404).json({ message: result.error });
         }
         res.json({ message: 'Item removed from cart' });
     } catch (err) {
         console.error('Error deleting cart item:', err);
-        res.status(500).json({ message: 'Error deleting cart item' });
+        res.status(500).json({ message: `Error deleting cart item: ${err.message}` });
     }
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+    console.error("Unhandled error:", err);
+    res.status(500).json({ message: `Server error: ${err.message}` });
 });
 
 // Start server
@@ -523,6 +603,12 @@ app.listen(PORT, async () => {
         } catch {
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify([], null, 2));
             console.log("Initialized empty products.json");
+        }
+        try {
+            await fs.access(CARTS_FILE);
+        } catch {
+            await fs.writeFile(CARTS_FILE, JSON.stringify([], null, 2));
+            console.log("Initialized empty carts.json");
         }
         console.log(`Server running on http://localhost:${PORT}`);
     } catch (err) {
