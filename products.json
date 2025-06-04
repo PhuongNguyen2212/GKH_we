@@ -1,72 +1,50 @@
 [
   {
-    "id": 1,
-    "name": "Pendant",
+    "id": "NC0001",
+    "name": "we",
     "brand": "Cartier",
     "type": "Nhẫn",
-    "stock": 10,
-    "imageUrl": "/backend/uploads/1748354129841-414973135.png",
-    "originalPrice": 2412000000,
-    "salePrice": 12000000
+    "stock": 12,
+    "imageUrl": "/backend/uploads/undefined-1749031352281.png",
+    "originalPrice": 12000,
+    "salePrice": 0,
+    "material": "24K Gold",
+    "version": 0
   },
   {
-    "id": 2,
-    "name": "Pendant",
-    "brand": "Bvlgari",
-    "type": "Nhẫn",
-    "stock": 222,
-    "imageUrl": "/backend/uploads/1748354687465-11398515.png",
-    "originalPrice": 2412000000,
-    "salePrice": 1212000
-  },
-  {
-    "id": 3,
-    "name": "Pendant",
+    "id": "NC0002",
+    "name": "pe",
     "brand": "Cartier",
     "type": "Nhẫn",
-    "stock": 9,
-    "imageUrl": "/backend/uploads/1748397986777-961266765.png",
-    "originalPrice": 24000000,
-    "salePrice": 12000000
+    "stock": 12,
+    "imageUrl": "/backend/uploads/undefined-1749031526475.png",
+    "originalPrice": 12,
+    "salePrice": 0,
+    "material": "24K Gold",
+    "version": 0
   },
   {
-    "id": 4,
-    "name": "Pendant",
-    "brand": "Cartier",
-    "type": "Nhẫn",
-    "stock": 14,
-    "imageUrl": "/backend/uploads/1748400413240-58419535.png",
-    "originalPrice": 24000000,
-    "salePrice": 12000000
-  },
-  {
-    "id": 5,
-    "name": "Pendant",
+    "id": "DC0001",
+    "name": "aaa",
     "brand": "Cartier",
     "type": "Dây chuyền",
     "stock": 12,
-    "imageUrl": "/backend/uploads/1748403141402-181442328.png",
-    "originalPrice": 24000000,
-    "salePrice": 24000000
+    "imageUrl": "/backend/uploads/undefined-1749033249125.png",
+    "originalPrice": 1200000,
+    "salePrice": 0,
+    "material": "24K Gold",
+    "version": 0
   },
   {
-    "id": 6,
-    "name": "Pendant",
-    "brand": "Van Cleef & Arpels",
-    "type": "Vòng tay",
-    "stock": 12,
-    "imageUrl": "/backend/uploads/1748403176385-775231841.png",
-    "originalPrice": 24000000,
-    "salePrice": 0
-  },
-  {
-    "id": 7,
-    "name": "Pendant",
-    "brand": "Van Cleef & Arpels",
+    "id": "NC0003",
+    "name": "ge",
+    "brand": "Cartier",
     "type": "Nhẫn",
-    "stock": 15,
-    "imageUrl": "/backend/uploads/1748403539990-152399040.png",
-    "originalPrice": 24000000,
-    "salePrice": 0
+    "stock": 12,
+    "imageUrl": "/backend/uploads/undefined-1749033995067.png",
+    "originalPrice": 12,
+    "salePrice": 0,
+    "material": "24K Gold",
+    "version": 0
   }
 ]

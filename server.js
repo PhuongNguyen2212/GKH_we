@@ -6,12 +6,11 @@ const multer = require("multer");
 const fs = require("fs").promises;
 const path = require("path");
 const lockfile = require("proper-lockfile");
-const ExcelJS = require('exceljs');
+const crypto = require("crypto");
 require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const CARTS_FILE = path.join(__dirname, 'carts.json');
 const PRODUCTS_FILE = path.join(__dirname, "products.json");
 const UPLOADS_DIR = path.join(__dirname, "Uploads");
 const ALLOWED_BRANDS = ["Cartier", "Bvlgari", "Van Cleef & Arpels", "Chrome Hearts", "GKH Jewelry"];
@@ -19,10 +18,7 @@ const ALLOWED_TYPES = ["Nhẫn", "Dây chuyền", "Vòng tay", "Vòng cổ", "Kh
 const ALLOWED_MATERIALS = ["18K Gold", "24K Gold", "925 Silver", "Platinum", "Diamond"];
 
 // Middleware
-app.use(cors({
-    origin: ["http://localhost:3000", "https://your-frontend-domain.com"], // Replace with your frontend URL
-    credentials: true
-}));
+app.use(cors());
 app.use(express.json());
 app.use("/backend/uploads", express.static(UPLOADS_DIR, {
     setHeaders: (res, path) => {
@@ -31,24 +27,74 @@ app.use("/backend/uploads", express.static(UPLOADS_DIR, {
 }));
 app.use(express.static(path.join(__dirname, "public")));
 
-// Multer configuration
+// Helper function to compute image hash
+async function getImageHash(fileBuffer) {
+    return new Promise((resolve, reject) => {
+        const hash = crypto.createHash("sha256");
+        hash.update(fileBuffer);
+        resolve(hash.digest("hex"));
+    });
+}
+
+// Helper function to check for existing image by hash
+async function findExistingImage(fileBuffer) {
+    const newHash = await getImageHash(fileBuffer);
+    console.log("Computed image hash:", newHash);
+    try {
+        const files = await fs.readdir(UPLOADS_DIR);
+        for (const filename of files) {
+            const filePath = path.join(UPLOADS_DIR, filename);
+            const existingBuffer = await fs.readFile(filePath);
+            const existingHash = await getImageHash(existingBuffer);
+            if (newHash === existingHash) {
+                console.log("Found matching image:", filename);
+                return `/backend/uploads/${filename}`;
+            }
+        }
+    } catch (err) {
+        console.error("Error scanning uploads directory:", err.message);
+    }
+    return null;
+}
+
+// Helper function to generate unique filename using timestamp
+async function getUniqueFilename(filename) {
+    const ext = path.extname(filename);
+    const base = path.basename(filename, ext);
+    let newFilename = filename;
+
+    // Check if file exists
+    if (await fs.access(path.join(UPLOADS_DIR, newFilename)).then(() => true).catch(() => false)) {
+        const timestamp = Date.now();
+        newFilename = `${base}-${timestamp}${ext}`;
+    }
+
+    console.log("Generated filename:", newFilename);
+    return newFilename;
+}
+
+// Multer storage configuration
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         cb(null, UPLOADS_DIR);
     },
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-        cb(null, uniqueSuffix + path.extname(file.originalname));
-    },
+    filename: async (req, file, cb) => {
+        console.log("Processing file:", { originalname: file.originalname });
+        const existingImageUrl = await findExistingImage(file.buffer);
+        if (existingImageUrl) {
+            console.log("Reusing existing image:", existingImageUrl);
+            req.existingImageUrl = existingImageUrl;
+            cb(null, path.basename(existingImageUrl));
+        } else {
+            const uniqueFilename = await getUniqueFilename(file.originalname);
+            cb(null, uniqueFilename);
+        }
+    }
 });
 
 const upload = multer({
     storage,
     fileFilter: (req, file, cb) => {
-        if (!file) {
-            console.log("File filter: No file provided");
-            return cb(new Error("No image file provided"), false);
-        }
         const filetypes = /jpeg|jpg|png/;
         const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
         const mimetype = filetypes.test(file.mimetype);
@@ -59,14 +105,20 @@ const upload = multer({
         console.log("File filter: Invalid file type", { name: file.originalname, type: file.mimetype });
         cb(new Error("Only jpg, jpeg, and png files are allowed"), false);
     },
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 });
 
-async function backupProductsFile() {
-    const backupPath = path.join(__dirname, `products_backup_${Date.now()}.json`);
-    await fs.copyFile(PRODUCTS_FILE, backupPath);
-    console.log(`Backup created: ${backupPath}`);
-}
+// Custom middleware to make image upload optional
+const optionalUpload = (req, res, next) => {
+    upload.single("image")(req, res, (err) => {
+        if (err instanceof multer.MulterError) {
+            return res.status(400).json({ message: `Upload error: ${err.message}` });
+        } else if (err) {
+            return res.status(400).json({ message: err.message });
+        }
+        next();
+    });
+};
 
 // File lock wrapper
 async function withFileLock(operation, callback) {
@@ -95,12 +147,41 @@ function verifyToken(req, res, next) {
     const token = authHeader.split(" ")[1];
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (!decoded.userId) {
+            console.error("Token verification: Missing userId in token payload");
+            return res.status(401).json({ message: "Invalid token: missing userId" });
+        }
         req.user = decoded;
+        console.log("Token verified, user:", req.user);
         next();
     } catch (err) {
-        console.error("Token verification error:", err);
-        res.status(401).json({ message: "Invalid token" });
+        console.error("Token verification error:", err.message);
+        return res.status(401).json({ message: "Invalid or expired token" });
     }
+}
+
+function generateProductCode(products, type, brand) {
+    if (!type || !brand || typeof type !== "string" || typeof brand !== "string") {
+        console.error("Invalid type or brand:", { type, brand });
+        throw new Error("Type and brand must be non-empty strings");
+    }
+    const prefix = `${type.trim().charAt(0).toUpperCase()}${brand.trim().charAt(0).toUpperCase()}`.trim();
+    const filteredNumbers = products
+        .filter(p => p && p.id && typeof p.id === "string" && p.id.startsWith(prefix))
+        .map(p => {
+            const numberPart = p.id.replace(prefix, "").trim();
+            const number = parseInt(numberPart, 10);
+            return isNaN(number) || number < 0 ? null : number;
+        })
+        .filter(num => num !== null);
+    const maxNumber = filteredNumbers.length > 0 ? Math.max(...filteredNumbers) : 0;
+    const newNumber = maxNumber + 1;
+    const newCode = `${prefix}${newNumber.toString().padStart(4, "0")}`;
+    if (products.some(p => p?.id === newCode)) {
+        console.warn("Duplicate ID detected, regenerating:", newCode);
+        return generateProductCode(products, type, brand);
+    }
+    return newCode;
 }
 
 // Login route
@@ -114,8 +195,9 @@ app.post("/api/login", async (req, res) => {
         console.log("Login failed: Invalid credentials");
         return res.status(401).json({ message: "Invalid username or password" });
     }
-    const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: "1h" });
-    console.log("Login successful:", { username });
+    const userId = username;
+    const token = jwt.sign({ userId, username }, process.env.JWT_SECRET, { expiresIn: "1h" });
+    console.log("Login successful:", { username, userId });
     res.json({ success: true, token });
 });
 
@@ -127,110 +209,7 @@ app.get("/api/products", async (req, res) => {
         res.json(products);
     } catch (err) {
         console.error("Error reading products:", err);
-        res.status(500).json({ message: `Error reading products: ${err.message}` });
-    }
-});
-
-// Upload Excel file
-app.post('/api/upload-excel', verifyToken, upload.single('excel'), async (req, res) => {
-    try {
-        if (!req.file) {
-            console.log("Validation failed: No Excel file provided");
-            return res.status(400).json({ message: 'No Excel file provided' });
-        }
-
-        const workbook = new ExcelJS.Workbook();
-        await workbook.xlsx.load(req.file.buffer);
-        const worksheet = workbook.getWorksheet(1);
-        const data = [];
-
-        worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-            if (rowNumber === 1) return; // Skip header
-            data.push({
-                Name: row.getCell(1).value,
-                Brand: row.getCell(2).value,
-                Type: row.getCell(3).value,
-                Stock: row.getCell(4).value,
-                OriginalPrice: row.getCell(5).value,
-                SalePrice: row.getCell(6).value,
-                Image: row.getCell(7).value,
-                Material: row.getCell(8).value || ALLOWED_MATERIALS[0] // Default to "18K Gold"
-            });
-        });
-
-        for (const product of data) {
-            if (!product.Name || !product.Brand || !product.Type || !product.Stock ||
-                product.OriginalPrice == null || !product.Material || !product.Image) {
-                console.log("Validation failed: Missing fields in Excel data", product);
-                return res.status(400).json({ message: 'Missing required fields in Excel data' });
-            }
-
-            const normalizedBrand = product.Brand?.toString().trim();
-            const normalizedType = product.Type?.toString().trim();
-            const normalizedMaterial = product.Material?.toString().trim();
-
-            if (!ALLOWED_BRANDS.includes(normalizedBrand)) {
-                return res.status(400).json({
-                    message: `Invalid brand: "${normalizedBrand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}`
-                });
-            }
-            if (!ALLOWED_TYPES.includes(normalizedType)) {
-                return res.status(400).json({
-                    message: `Invalid type: "${normalizedType}". Must be one of: ${ALLOWED_TYPES.join(", ")}`
-                });
-            }
-            if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
-                return res.status(400).json({
-                    message: `Invalid material: "${normalizedMaterial}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
-                });
-            }
-
-            const parsedStock = parseInt(product.Stock);
-            const parsedOriginalPrice = parseFloat(product.OriginalPrice);
-            const parsedSalePrice = parseFloat(product.SalePrice);
-
-            if (
-                isNaN(parsedStock) || parsedStock < 0 ||
-                isNaN(parsedOriginalPrice) || parsedOriginalPrice < 0 ||
-                isNaN(parsedSalePrice) || parsedSalePrice < 0
-            ) {
-                return res.status(400).json({ message: 'Invalid numeric fields in Excel data' });
-            }
-        }
-
-        const result = await withFileLock('upload_excel', async () => {
-            let products = [];
-            try {
-                const data = await fs.readFile(PRODUCTS_FILE, "utf8");
-                products = JSON.parse(data);
-            } catch (err) {
-                console.error("Error reading products.json:", err);
-                products = [];
-            }
-
-            const startId = products.length ? Math.max(...products.map(p => p.id)) + 1 : 1;
-            const newProducts = data.map((product, index) => ({
-                id: startId + index,
-                name: product.Name.toString().trim(),
-                brand: product.Brand.toString().trim(),
-                type: product.Type.toString().trim(),
-                stock: parseInt(product.Stock),
-                imageUrl: product.Image.toString().trim(),
-                originalPrice: parseFloat(product.OriginalPrice),
-                salePrice: parseFloat(product.SalePrice),
-                material: product.Material.toString().trim()
-            }));
-
-            products = [...products, ...newProducts];
-            await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
-            return newProducts;
-        });
-
-        console.log("Excel processed and saved:", result);
-        res.json({ message: 'Excel file processed successfully', products: result });
-    } catch (err) {
-        console.error('Error processing Excel file:', err);
-        res.status(500).json({ message: `Error processing Excel file: ${err.message}` });
+        res.status(500).json({ message: "Error reading products" });
     }
 });
 
@@ -246,12 +225,12 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
             originalPrice,
             salePrice,
             material,
-            image: req.file ? req.file.filename : "No image"
+            image: req.file ? req.file.filename : req.existingImageUrl || "No image"
         });
 
-        if (!name || !brand || !type || !stock || !originalPrice || !salePrice || !material || !req.file) {
+        if (!name || !brand || !type || !stock || !originalPrice || !salePrice || !material) {
             console.log("Validation failed: Missing required fields");
-            return res.status(400).json({ message: "All fields are required, including a jpg or png image file and material" });
+            return res.status(400).json({ message: "All fields are required, including material" });
         }
 
         const normalizedBrand = brand.trim();
@@ -260,28 +239,20 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
 
         if (!ALLOWED_BRANDS.includes(normalizedBrand)) {
             console.log("Validation failed: Invalid brand", normalizedBrand);
-            return res.status(400).json({
-                message: `Invalid brand: "${brand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}`
-            });
+            return res.status(400).json({ message: `Invalid brand: "${brand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}` });
         }
         if (!ALLOWED_TYPES.includes(normalizedType)) {
             console.log("Validation failed: Invalid type", normalizedType);
-            return res.status(400).json({
-                message: `Invalid type: "${type}". Must be one of: ${ALLOWED_TYPES.join(", ")}`
-            });
+            return res.status(400).json({ message: `Invalid type: "${type}". Must be one of: ${ALLOWED_TYPES.join(", ")}` });
         }
         if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
             console.log("Validation failed: Invalid material", normalizedMaterial);
-            return res.status(400).json({
-                message: `Invalid material: "${material}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
-            });
+            return res.status(400).json({ message: `Invalid material: "${material}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}` });
         }
 
         const parsedStock = parseInt(stock);
         const parsedOriginalPrice = parseFloat(originalPrice);
         const parsedSalePrice = parseFloat(salePrice);
-
-        console.log("Parsed values:", { parsedStock, parsedOriginalPrice, parsedSalePrice });
 
         if (
             isNaN(parsedStock) || parsedStock < 0 ||
@@ -297,63 +268,89 @@ app.post("/api/products", verifyToken, upload.single("image"), async (req, res) 
             try {
                 const data = await fs.readFile(PRODUCTS_FILE, "utf8");
                 products = JSON.parse(data);
+                if (!Array.isArray(products)) {
+                    console.error("products.json is not an array:", data);
+                    products = [];
+                }
             } catch (err) {
-                console.error("Error reading products.json:", err);
+                if (err.code === "ENOENT") {
+                    console.log("products.json not found, creating empty file");
+                    await fs.writeFile(PRODUCTS_FILE, JSON.stringify([], null, 2));
+                } else {
+                    console.error("Error reading products.json:", err);
+                }
                 products = [];
             }
 
+            const imageUrl = req.existingImageUrl || (req.file ? `/backend/uploads/${req.file.filename}` : null);
+            if (!imageUrl) {
+                console.log("Validation failed: No valid image provided");
+                return { error: "An image file (jpg or png) is required", status: 400 };
+            }
+
             const newProduct = {
-                id: products.length ? Math.max(...products.map((p) => p.id)) + 1 : 1,
+                id: generateProductCode(products, normalizedType, normalizedBrand),
                 name,
                 brand: normalizedBrand,
                 type: normalizedType,
                 stock: parsedStock,
-                imageUrl: `/backend/uploads/${req.file.filename}`,
+                imageUrl,
                 originalPrice: parsedOriginalPrice,
                 salePrice: parsedSalePrice,
-                material: normalizedMaterial
+                material: normalizedMaterial,
+                version: 0
             };
             products.push(newProduct);
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
+            console.log("Products after addition:", products.map(p => ({ id: p.id })));
             return newProduct;
         });
+
+        if (newProduct.error) {
+            if (req.file && !req.existingImageUrl) {
+                await fs.unlink(path.join(UPLOADS_DIR, req.file.filename)).catch(err => console.error("Failed to delete temp file:", err));
+            }
+            return res.status(newProduct.status || 400).json({ message: newProduct.error });
+        }
 
         console.log("Product added:", newProduct);
         res.status(201).json(newProduct);
     } catch (err) {
+        if (req.file && !req.existingImageUrl) {
+            await fs.unlink(path.join(UPLOADS_DIR, req.file.filename)).catch(err => console.error("Failed to delete temp file:", err));
+        }
         console.error("Error adding product:", err);
-        res.status(500).json({ message: `Error adding product: ${err.message}` });
+        res.status(500).json({ message: err.message || "Error adding product" });
     }
 });
 
-// Update a product
-app.patch("/api/products/:id", verifyToken, upload.single("image"), async (req, res) => {
+// Update product
+app.patch("/api/products/:id", verifyToken, optionalUpload, async (req, res) => {
     const { id } = req.params;
-    const { name, brand, type, stock, originalPrice, salePrice, material } = req.body;
-    console.log("Updating product:", { id, name, brand, type, stock, originalPrice, salePrice, material });
+    const { name, brand, type, material, stock, originalPrice, salePrice, version, keepImage } = req.body || {};
+    console.log("Updating product:", { id, name, brand, type, material, stock, originalPrice, salePrice, version, keepImage, file: req.file });
 
     try {
         const updates = {};
-        if (name !== undefined) updates.name = name.trim();
+        if (name !== undefined) {
+            const trimmedName = name.trim();
+            if (!trimmedName) return res.status(400).json({ message: "Name cannot be empty" });
+            updates.name = trimmedName;
+        }
         if (brand !== undefined) {
-            const normalizedBrand = brand.trim();
-            if (!ALLOWED_BRANDS.includes(normalizedBrand)) {
-                console.log("Validation failed: Invalid brand", normalizedBrand);
-                return res.status(400).json({
-                    message: `Invalid brand: "${brand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}`
-                });
-            }
-            updates.brand = normalizedBrand;
+            if (!ALLOWED_BRANDS.includes(brand)) return res.status(400).json({ message: `Invalid brand: "${brand}". Must be one of: ${ALLOWED_BRANDS.join(", ")}` });
+            updates.brand = brand;
         }
         if (type !== undefined) {
-            const normalizedType = type.trim();
-            if (!ALLOWED_TYPES.includes(normalizedType)) {
-                console.log("Validation failed: Invalid type", normalizedType);
-                return res.status(400).json({
-                    message: `Invalid type: "${type}". Must be one of: ${ALLOWED_TYPES.join(", ")}`
-                });
+            if (!ALLOWED_TYPES.includes(type)) return res.status(400).json({ message: `Invalid type: "${type}". Must be one of: ${ALLOWED_TYPES.join(", ")}` });
+            updates.type = type;
+        }
+        if (material !== undefined) {
+            const normalizedMaterial = material.trim();
+            if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
+                return res.status(400).json({ message: `Invalid material: "${material}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}` });
             }
-            updates.type = normalizedType;
+            updates.material = normalizedMaterial;
         }
         if (stock !== undefined) {
             const parsedStock = parseInt(stock);
@@ -364,7 +361,7 @@ app.patch("/api/products/:id", verifyToken, upload.single("image"), async (req, 
         }
         if (originalPrice !== undefined) {
             const parsedOriginalPrice = parseFloat(originalPrice);
-            if (isNaN(parsedOriginalPrice) || parsedOriginalPrice < 0) {
+            if (isNaN(parsedOriginalPrice) || parsedOriginalPrice <= 0) {
                 return res.status(400).json({ message: "Invalid original price value" });
             }
             updates.originalPrice = parsedOriginalPrice;
@@ -376,20 +373,12 @@ app.patch("/api/products/:id", verifyToken, upload.single("image"), async (req, 
             }
             updates.salePrice = parsedSalePrice;
         }
-        if (material !== undefined && material !== "") {
-            const normalizedMaterial = material.trim();
-            if (!ALLOWED_MATERIALS.includes(normalizedMaterial)) {
-                console.log("Validation failed: Invalid material", normalizedMaterial);
-                return res.status(400).json({
-                    message: `Invalid material: "${material}". Must be one of: ${ALLOWED_MATERIALS.join(", ")}`
-                });
-            }
-            updates.material = normalizedMaterial;
-        } else if (material === "") {
-            updates.material = ALLOWED_MATERIALS[0]; // Default to "18K Gold"
-        }
-        if (req.file) {
+        if (req.existingImageUrl) {
+            updates.imageUrl = req.existingImageUrl;
+        } else if (req.file) {
             updates.imageUrl = `/backend/uploads/${req.file.filename}`;
+        } else if (keepImage !== "true") {
+            return res.status(400).json({ message: "An image file is required unless keepImage is true" });
         }
 
         if (Object.keys(updates).length === 0) {
@@ -401,197 +390,142 @@ app.patch("/api/products/:id", verifyToken, upload.single("image"), async (req, 
             try {
                 const data = await fs.readFile(PRODUCTS_FILE, "utf8");
                 products = JSON.parse(data);
+                if (!Array.isArray(products)) {
+                    console.error("products.json is not an array:", data);
+                    await fs.writeFile(PRODUCTS_FILE, JSON.stringify([], null, 2));
+                    return { error: "Invalid products data format", status: 500 };
+                }
             } catch (err) {
-                console.error("Error reading products.json:", err);
-                throw new Error("Failed to read products file");
+                if (err.code === "ENOENT") {
+                    console.log("products.json not found, creating empty file");
+                    await fs.writeFile(PRODUCTS_FILE, JSON.stringify([], null, 2));
+                } else {
+                    console.error("Error reading products.json:", err);
+                    return { error: "Error accessing product data", status: 500 };
+                }
             }
 
-            const productIndex = products.findIndex((p) => p.id === parseInt(id));
+            const productIndex = products.findIndex(p => p.id === id.trim());
+            console.log("Product search:", { id, found: productIndex !== -1, products: products.map(p => ({ id: p.id })) });
             if (productIndex === -1) {
-                return { error: "Product not found" };
+                return { error: `Product with ID ${id} not found`, status: 404 };
             }
 
-            // Ensure existing product has material field
-            if (!products[productIndex].material) {
-                products[productIndex].material = ALLOWED_MATERIALS[0]; // Default to "18K Gold"
+            if (version !== undefined && parseInt(version) !== (products[productIndex].version || 0)) {
+                return { error: "Product was modified by another user", status: 409 };
             }
 
+            // Delete old image if a new one is provided
+            if (updates.imageUrl && updates.imageUrl !== products[productIndex].imageUrl) {
+                const oldImagePath = path.join(__dirname, products[productIndex].imageUrl || "");
+                try {
+                    await fs.unlink(oldImagePath);
+                    console.log("Deleted old image:", oldImagePath);
+                } catch (err) {
+                    console.warn("Failed to delete old image:", err.message);
+                }
+            }
+
+            updates.version = (products[productIndex].version || 0) + 1;
             products[productIndex] = { ...products[productIndex], ...updates };
             if (updates.stock === 0) {
-                products.splice(productIndex, 1);
+                const deletedProduct = products.splice(productIndex, 1)[0];
+                if (deletedProduct.imageUrl) {
+                    const imagePath = path.join(__dirname, deletedProduct.imageUrl);
+                    try {
+                        await fs.unlink(imagePath);
+                        console.log("Deleted image due to zero stock:", imagePath);
+                    } catch (err) {
+                        console.warn("Failed to delete image:", err.message);
+                    }
+                }
                 console.log("Product deleted due to zero stock:", { id });
+                return { deleted: true, message: "Product deleted due to zero stock" };
             }
+
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
-            return { product: products[productIndex] || null };
+            console.log("Products after update:", products.map(p => ({ id: p.id })));
+            return { product: products[productIndex] };
         });
 
         if (result.error) {
-            return res.status(404).json({ message: result.error });
+            if (req.file && !req.existingImageUrl) {
+                await fs.unlink(path.join(UPLOADS_DIR, req.file.filename)).catch(err => console.error("Failed to delete temp file:", err));
+            }
+            return res.status(result.status || 404).json({ message: result.error });
         }
-        res.json(result.product || { message: "Product deleted due to zero stock" });
+
+        res.json(result.product || { deleted: true, message: result.message });
     } catch (err) {
-        console.error("Error updating product:", err);
-        res.status(500).json({ message: `Error updating product: ${err.message}` });
+        if (req.file && !req.existingImageUrl) {
+            await fs.unlink(path.join(UPLOADS_DIR, req.file.filename)).catch(err => console.error("Failed to delete temp file:", err));
+        }
+        console.error("Error updating product:", { id, error: err.message, stack: err.stack });
+        res.status(500).json({ message: err.message || "Error updating product" });
     }
 });
 
-// Delete product
+// DELETE endpoint
 app.delete("/api/products/:id", verifyToken, async (req, res) => {
     const { id } = req.params;
-    console.log("Deleting product:", { id });
+    console.log("Received DELETE request for product:", { id, type: typeof id });
+
     try {
-        const result = await withFileLock(`delete_product_${id}`, async () => {
+        const release = await lockfile.lock(PRODUCTS_FILE);
+        try {
             let products = [];
             try {
                 const data = await fs.readFile(PRODUCTS_FILE, "utf8");
+                console.log("Raw products.json data:", data);
                 products = JSON.parse(data);
+                if (!Array.isArray(products)) {
+                    console.error("products.json is not an array:", data);
+                    await fs.writeFile(PRODUCTS_FILE, JSON.stringify([], null, 2));
+                    return res.status(500).json({ message: "Invalid products data format. Reset to empty array." });
+                }
             } catch (err) {
-                console.error("Error reading products.json:", err);
-                throw new Error("Failed to read products file");
+                if (err.code === "ENOENT") {
+                    console.log("products.json not found, creating empty file");
+                    await fs.writeFile(PRODUCTS_FILE, JSON.stringify([], null, 2));
+                } else {
+                    console.error("Error reading products.json:", err.message);
+                    return res.status(500).json({ message: "Error accessing product data", error: err.message });
+                }
             }
 
-            const productIndex = products.findIndex((p) => p.id === parseInt(id));
+            if (!id || typeof id !== "string" || id.trim() === "") {
+                console.warn("Invalid product ID:", id);
+                return res.status(400).json({ message: "Invalid product ID" });
+            }
+
+            const productIndex = products.findIndex(p => p.id === id.trim());
+            console.log("Product search:", { id, found: productIndex !== -1, products: products.map(p => ({ id: p.id })) });
             if (productIndex === -1) {
-                return { error: "Product not found" };
+                return res.status(404).json({ message: `Product with ID ${id} not found` });
             }
-            const [deletedProduct] = products.splice(productIndex, 1);
+
+            const deletedProduct = products.splice(productIndex, 1)[0];
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
-            return { product: deletedProduct };
-        });
+            console.log("Products after deletion:", products.map(p => ({ id: p.id })));
 
-        if (result.error) {
-            return res.status(404).json({ message: result.error });
+            if (deletedProduct.imageUrl) {
+                const imagePath = path.join(__dirname, deletedProduct.imageUrl);
+                try {
+                    await fs.unlink(imagePath);
+                    console.log("Deleted image:", imagePath);
+                } catch (err) {
+                    console.warn("Failed to delete image:", err.message);
+                }
+            }
+
+            res.json({ message: "Product deleted successfully" });
+        } finally {
+            await release();
         }
-        res.json({ message: "Product deleted successfully" });
     } catch (err) {
-        console.error("Error deleting product:", err);
-        res.status(500).json({ message: `Error deleting product: ${err.message}` });
+        console.error("Error deleting product:", { id, error: err.message, stack: err.stack });
+        res.status(500).json({ message: "Error deleting product", error: err.message });
     }
-});
-
-// Add to cart
-app.post('/api/cart', verifyToken, async (req, res) => {
-    try {
-        const { productId, quantity } = req.body;
-        const userId = req.user.username; // Changed from userId to username to match JWT payload
-        console.log("Adding to cart:", { userId, productId, quantity });
-
-        if (!productId || !quantity || quantity < 1) {
-            return res.status(400).json({ message: 'Invalid product ID or quantity' });
-        }
-
-        let products = [];
-        try {
-            const data = await fs.readFile(PRODUCTS_FILE, 'utf8');
-            products = JSON.parse(data);
-        } catch (err) {
-            console.error("Error reading products.json:", err);
-            return res.status(500).json({ message: 'Error reading products' });
-        }
-
-        const product = products.find(p => p.id === parseInt(productId));
-        if (!product) {
-            return res.status(404).json({ message: 'Product not found' });
-        }
-        if (product.stock < quantity) {
-            return res.status(400).json({ message: 'Insufficient stock' });
-        }
-
-        const result = await withFileLock('cart', async () => {
-            let carts = [];
-            try {
-                const data = await fs.readFile(CARTS_FILE, 'utf8');
-                carts = JSON.parse(data);
-            } catch (err) {
-                console.error("Error reading carts.json:", err);
-            }
-
-            let userCart = carts.find(c => c.userId === userId);
-            if (!userCart) {
-                userCart = { userId, items: [] };
-                carts.push(userCart);
-            }
-
-            const item = userCart.items.find(i => i.productId === parseInt(productId));
-            if (item) {
-                item.quantity += quantity;
-            } else {
-                userCart.items.push({ productId: parseInt(productId), quantity });
-            }
-
-            await fs.writeFile(CARTS_FILE, JSON.stringify(carts, null, 2));
-            return userCart;
-        });
-
-        res.json({ message: 'Added to cart', cart: result });
-    } catch (err) {
-        console.error("Error updating cart:", err);
-        res.status(500).json({ message: `Error updating cart: ${err.message}` });
-    }
-});
-
-// Get all carts
-app.get('/api/cart', verifyToken, async (req, res) => {
-    try {
-        let carts = [];
-        try {
-            const data = await fs.readFile(CARTS_FILE, 'utf8');
-            carts = JSON.parse(data);
-        } catch (err) {
-            console.error("Error reading carts.json:", err);
-        }
-        res.json(carts);
-    } catch (err) {
-        console.error('Error reading carts:', err);
-        res.status(500).json({ message: `Error reading carts: ${err.message}` });
-    }
-});
-
-// Delete cart item
-app.delete('/api/cart', verifyToken, async (req, res) => {
-    const { productId } = req.body;
-    const userId = req.user.username; // Changed from userId to username to match JWT payload
-    console.log("Deleting cart item:", { userId, productId });
-    try {
-        const result = await withFileLock('delete_cart_item', async () => {
-            let carts = [];
-            try {
-                const data = await fs.readFile(CARTS_FILE, 'utf8');
-                carts = JSON.parse(data);
-            } catch (err) {
-                console.error("Error reading carts.json:", err);
-            }
-
-            const userCart = carts.find(c => c.userId === userId);
-            if (!userCart) {
-                return { error: 'Cart not found' };
-            }
-            const itemIndex = userCart.items.findIndex(i => i.productId === parseInt(productId));
-            if (itemIndex === -1) {
-                return { error: 'Item not found in cart' };
-            }
-            userCart.items.splice(itemIndex, 1);
-            if (userCart.items.length === 0) {
-                carts = carts.filter(c => c.userId !== userId);
-            }
-            await fs.writeFile(CARTS_FILE, JSON.stringify(carts, null, 2));
-            return { success: true };
-        });
-
-        if (result.error) {
-            return res.status(404).json({ message: result.error });
-        }
-        res.json({ message: 'Item removed from cart' });
-    } catch (err) {
-        console.error('Error deleting cart item:', err);
-        res.status(500).json({ message: `Error deleting cart item: ${err.message}` });
-    }
-});
-
-// Global error handler
-app.use((err, req, res, next) => {
-    console.error("Unhandled error:", err);
-    res.status(500).json({ message: `Server error: ${err.message}` });
 });
 
 // Start server
@@ -603,12 +537,6 @@ app.listen(PORT, async () => {
         } catch {
             await fs.writeFile(PRODUCTS_FILE, JSON.stringify([], null, 2));
             console.log("Initialized empty products.json");
-        }
-        try {
-            await fs.access(CARTS_FILE);
-        } catch {
-            await fs.writeFile(CARTS_FILE, JSON.stringify([], null, 2));
-            console.log("Initialized empty carts.json");
         }
         console.log(`Server running on http://localhost:${PORT}`);
     } catch (err) {
